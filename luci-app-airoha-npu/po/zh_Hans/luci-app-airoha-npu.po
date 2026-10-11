@@ -5,6 +5,7 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 
 msgid "5 s refresh"
 msgstr "5 秒刷新"
@@ -743,3 +744,51 @@ msgstr "协商 / 预期速率"
 
 msgid "Switches here apply the hardware offload settings for this device."
 msgstr "此处开关用于应用本设备的硬件卸载设置。"
+
+msgid "Frame Engine"
+msgstr "帧引擎"
+
+msgid "Register-level counters for the GDM data MACs and CDM DMA engines, read from the frame-engine block."
+msgstr "直接读取帧引擎寄存器，展示 GDM 数据 MAC 与 CDM DMA 引擎的计数。"
+
+msgid "GDM Ports"
+msgstr "GDM 端口"
+
+msgid "TX packets"
+msgstr "TX 报文"
+
+msgid "RX packets"
+msgstr "RX 报文"
+
+msgid "No port"
+msgstr "无端口"
+
+msgid "CDM Engines"
+msgstr "CDM 引擎"
+
+msgid "CPU path"
+msgstr "CPU 路径"
+
+msgid "HW forwarded"
+msgstr "硬件转发"
+
+msgid "CPU dropped"
+msgstr "CPU 丢弃"
+
+msgid "HW dropped"
+msgstr "硬件丢弃"
+
+msgid "Frame Engine counters are unavailable on this build."
+msgstr "此构建无法读取帧引擎计数器。"
+
+msgid "Frame Engine counters need the devmem applet (CONFIG_BUSYBOX_CONFIG_DEVMEM) and /dev/mem; neither is available on this build."
+msgstr "帧引擎计数器需要 busybox 的 devmem 小程序（CONFIG_BUSYBOX_CONFIG_DEVMEM）和 /dev/mem，此构建两者都不具备。"
+
+msgid "Frequency band"
+msgstr "频段"
+
+msgid "Link up"
+msgstr "已连接"
+
+msgid "Link down"
+msgstr "未连接"

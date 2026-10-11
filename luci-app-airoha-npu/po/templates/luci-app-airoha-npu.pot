@@ -1,5 +1,10 @@
 msgid ""
-msgstr "Content-Type: text/plain; charset=UTF-8\n"
+msgstr ""
+"Project-Id-Version: luci-app-airoha-npu\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 
 msgid "5 s refresh"
 msgstr ""
@@ -737,4 +742,52 @@ msgid "PHY / Expected"
 msgstr ""
 
 msgid "Switches here apply the hardware offload settings for this device."
+msgstr ""
+
+msgid "Frame Engine"
+msgstr ""
+
+msgid "Register-level counters for the GDM data MACs and CDM DMA engines, read from the frame-engine block."
+msgstr ""
+
+msgid "GDM Ports"
+msgstr ""
+
+msgid "TX packets"
+msgstr ""
+
+msgid "RX packets"
+msgstr ""
+
+msgid "No port"
+msgstr ""
+
+msgid "CDM Engines"
+msgstr ""
+
+msgid "CPU path"
+msgstr ""
+
+msgid "HW forwarded"
+msgstr ""
+
+msgid "CPU dropped"
+msgstr ""
+
+msgid "HW dropped"
+msgstr ""
+
+msgid "Frame Engine counters are unavailable on this build."
+msgstr ""
+
+msgid "Frame Engine counters need the devmem applet (CONFIG_BUSYBOX_CONFIG_DEVMEM) and /dev/mem; neither is available on this build."
+msgstr ""
+
+msgid "Frequency band"
+msgstr ""
+
+msgid "Link up"
+msgstr ""
+
+msgid "Link down"
 msgstr ""
