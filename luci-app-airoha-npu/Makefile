@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 
 LUCI_NAME:=luci-app-airoha-npu
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=6
+PKG_RELEASE:=8
 PKG_LICENSE:=Apache-2.0
 PKG_MAINTAINER:=XR1710G Maintainer
 TITLE:=LuCI Airoha XR1710G / XG2010G Status
@@ -13,7 +13,38 @@ LUCI_TITLE:=LuCI Airoha XR1710G / XG2010G Status
 LUCI_DESCRIPTION:=Unified Airoha XR1710G and XG2010G SoC/NPU status app with CPU, \
 	frame-engine, PPE hardware-offload, Ethernet topology and board-aware WiFi monitoring. \
 	The WiFi section is shown on XR1710G and omitted on radio-less XG2010G systems.
-LUCI_DEPENDS:=+luci-base +kmod-br-netfilter
+
+# The Frame Engine block (GDM/CDM/PSE counters) reads the AN7581 register window
+# straight out of physical memory, so the image needs *both* halves of the
+# devmem path or that whole block degrades at runtime to "devmem applet ...
+# unavailable":
+#
+#   CONFIG_KERNEL_DEVMEM      the kernel side; without it /dev/mem does not
+#                             exist at all, and `dd if=/dev/mem` is not a
+#                             fallback - the memory char device rejects those
+#                             reads with EFAULT, only mmap (what devmem uses)
+#                             reaches the registers.
+#   BUSYBOX_*_DEVMEM          the applet side; without it `command -v devmem`
+#                             fails in the rpcd backend.
+#
+# busybox builds its applet list from CONFIG_BUSYBOX_CONFIG_* when
+# CONFIG_BUSYBOX_CUSTOM=y and from CONFIG_BUSYBOX_DEFAULT_* otherwise (see
+# BUSYBOX_SYM in package/utils/busybox/Makefile), and the CONFIG_ family is not
+# settable while BUSYBOX_CUSTOM=n. Both are declared so that whichever family
+# the target reads is already y; deciding between them here would need
+# $(CONFIG_BUSYBOX_CUSTOM) at Makefile-parse time, which is unavailable: the
+# package scan (include/scan.mk) only regenerates tmp/.packageinfo when the
+# Makefile set changes, never when .config does, so a conditional DEPENDS would
+# be silently stale. Declaring a superset cannot break either mode - the
+# unused family's value is simply never read.
+#
+# XR1710G already gets all three from its config seed, and XG2010G gets the
+# applet from busybox's per-device CONFIG_DEVMEM override; declaring them here
+# is what protects any other target this app is built into.
+LUCI_DEPENDS:=+luci-base +kmod-br-netfilter \
+	+@KERNEL_DEVMEM \
+	+@BUSYBOX_DEFAULT_DEVMEM \
+	+@BUSYBOX_CONFIG_DEVMEM
 
 include $(TOPDIR)/feeds/luci/luci.mk
 
