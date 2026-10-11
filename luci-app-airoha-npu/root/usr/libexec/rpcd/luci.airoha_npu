@@ -6,6 +6,17 @@
 
 . /usr/libexec/rpcd/airoha-common.sh
 
+# Escape a value before it is embedded in a JSON string literal.
+#
+# Every value that reaches printf below is either read from sysfs or echoed
+# straight back to the caller in an error message. The error paths are the
+# dangerous ones: they report the input that was rejected, so a caller can
+# smuggle a quote or a brace into the object and make rpcd (and the page)
+# parse something that was never produced here.
+_json_escape() {
+	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\r\n\t' '   '
+}
+
 _has_active_wan() {
 	local wan_status up l3_device ipv4 ipv6
 
@@ -230,10 +241,13 @@ get_status() {
 	done
 	[ -n "$soc_compat" ] || soc_compat="Unknown"
 
+	# Strings read back from sysfs / /proc / the device tree are escaped: they
+	# are kernel-owned today, but a value carrying a quote or a brace would
+	# otherwise be spliced into the object verbatim.
 	printf '{"npu_version":"%s","npu_loaded":%s,"npu_device":"%s","npu_clock":%d,"npu_cores":%d,"offload_bound":%d,"offload_total":%d,"memory_regions":%s,"cpu_cur_freq":%d,"cpu_hw_freq":%d,"cpu_governor":"%s","cpu_avail_governors":"%s","cpu_min_freq":%d,"cpu_max_freq":%d,"cpu_avail_freqs":"%s","cpu_cpufreq_available":%d,"cpu_cpufreq_reason":"%s","cpu_count":%d,"cpu_arch":"%s","cpu_temp":"%s","soc_compat":"%s","has_pon":%d}' \
-		"${npu_ver:-Unknown}" "$npu_loaded" "${npu_device:-}" "${npu_clock:-0}" "${npu_cores:-0}" "${offload_bound:-0}" "${offload_total:-0}" "$regions" \
-		"${cpu_cur_freq:-0}" "${cpu_hw_freq:-0}" "${cpu_governor:-unknown}" "${cpu_avail_governors:-}" "${cpu_min_freq:-0}" "${cpu_max_freq:-0}" "${cpu_avail_freqs:-}" "${cpu_cpufreq_available:-0}" "${cpu_cpufreq_reason:-no_cpufreq}" "${cpu_count:-0}" \
-		"${cpu_arch:-}" "${cpu_temp:-N/A}" "${soc_compat:-}" "${has_pon:-0}"
+		"$(_json_escape "${npu_ver:-Unknown}")" "$npu_loaded" "$(_json_escape "${npu_device:-}")" "${npu_clock:-0}" "${npu_cores:-0}" "${offload_bound:-0}" "${offload_total:-0}" "$regions" \
+		"${cpu_cur_freq:-0}" "${cpu_hw_freq:-0}" "$(_json_escape "${cpu_governor:-unknown}")" "$(_json_escape "${cpu_avail_governors:-}")" "${cpu_min_freq:-0}" "${cpu_max_freq:-0}" "${cpu_avail_freqs:-}" "${cpu_cpufreq_available:-0}" "${cpu_cpufreq_reason:-no_cpufreq}" "${cpu_count:-0}" \
+		"$(_json_escape "${cpu_arch:-}")" "${cpu_temp:-N/A}" "$(_json_escape "${soc_compat:-}")" "${has_pon:-0}"
 }
 
 get_topology() {
@@ -349,7 +363,7 @@ set_governor() {
 	# Validate governor is available
 	avail=$(cat "$cpufreq_path/scaling_available_governors" 2>/dev/null)
 	if ! _cpu_governor_allowed "$cpufreq_path" "$governor"; then
-		printf '{"error":"invalid governor: %s"}' "$governor"
+		printf '{"error":"invalid governor: %s"}' "$(_json_escape "$governor")"
 		return
 	fi
 
@@ -382,7 +396,7 @@ set_max_freq() {
 
 	# Accept only a kernel-advertised frequency in the validated range.
 	if ! _cpu_freq_allowed "$cpufreq_path" "$freq"; then
-		printf '{"error":"invalid frequency: %s"}' "$freq"
+		printf '{"error":"invalid frequency: %s"}' "$(_json_escape "$freq")"
 		return
 	fi
 
@@ -417,14 +431,14 @@ set_cpu_settings() {
 	}
 
 	if [ -n "$freq" ] && ! _cpu_freq_allowed "$cpufreq_path" "$freq"; then
-		printf '{"error":"invalid frequency: %s"}' "$freq"
+		printf '{"error":"invalid frequency: %s"}' "$(_json_escape "$freq")"
 		return
 	fi
 
 	if [ -n "$governor" ]; then
 		avail_g=$(cat "$cpufreq_path/scaling_available_governors" 2>/dev/null)
 		if ! _cpu_governor_allowed "$cpufreq_path" "$governor"; then
-			printf '{"error":"invalid governor: %s"}' "$governor"
+			printf '{"error":"invalid governor: %s"}' "$(_json_escape "$governor")"
 			return
 		fi
 	fi
