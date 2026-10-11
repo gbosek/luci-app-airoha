@@ -62,6 +62,18 @@ bool()
 	[ "$1" = "1" ] && printf true || printf false
 }
 
+# Scratch file under /tmp, created exclusively.
+#
+# rpcd execs this plugin as root and /tmp is world-writable, so a name built
+# from $$ is guessable: a symlink planted at that path turns a later
+# `> "$f"` into a root write to wherever the link points. On the pull path the
+# bytes being written come from the peer's HTTP response, so the content is not
+# ours either. mktemp - unlike mkdir -p + a fixed name - cannot be raced.
+mc_tmp()
+{
+	mktemp "${1}.XXXXXX" 2>/dev/null
+}
+
 have()
 {
 	local name="$1" dir
@@ -283,8 +295,8 @@ radio_sections()
 # them up by line number is safe.
 phy_map_prepare()
 {
-	WSTAT_N=/tmp/.meshconf-wstat.$$
-	WSTAT_P=/tmp/.meshconf-wstatp.$$
+	WSTAT_N="$(mc_tmp /tmp/.meshconf-wstat)" || return 0
+	WSTAT_P="$(mc_tmp /tmp/.meshconf-wstatp)" || { rm -f "$WSTAT_N"; WSTAT_N=""; return 0; }
 	wifi status > "$WSTAT_N.raw" 2>/dev/null
 	jsonfilter -i "$WSTAT_N.raw" -e '@.radios[*].name' > "$WSTAT_N" 2>/dev/null
 	jsonfilter -i "$WSTAT_N.raw" -e '@.radios[*].config.phy' > "$WSTAT_P" 2>/dev/null
@@ -1219,7 +1231,8 @@ restart_sync()
 # ---------------------------------------------------------------------------
 probe_http()
 {
-	local ip="$1" port="$2" f=/tmp/.meshconf-probe.$$
+	local ip="$1" port="$2" f
+	f="$(mc_tmp /tmp/.meshconf-probe)" || return 1
 	uclient-fetch -q -O "$f" -T 3 "http://$ip:$port/cgi/sync?action=hello" >/dev/null 2>&1 || {
 		rm -f "$f"
 		return 1
@@ -1281,7 +1294,8 @@ beacon_running()
 # list that looks like a dead feature.
 collect_now()
 {
-	local port="$1" tmp="/tmp/.meshconf-scan.$$" line now pid
+	local port="$1" tmp line now pid
+	tmp="$(mc_tmp /tmp/.meshconf-scan)" || return 0
 	: > "$tmp" 2>/dev/null
 
 	(
@@ -1390,8 +1404,8 @@ sync_dawn_pull()
 	local ip="$1" key="$2" port="$3" f d
 	[ -x /etc/init.d/dawn ] || { printf 'skipped'; return; }
 
-	f=/tmp/.meshconf-dawnget.$$
-	d=/tmp/.meshconf-dawncfg.$$
+	f="$(mc_tmp /tmp/.meshconf-dawnget)" || { printf 'failed'; return; }
+	d="$(mc_tmp /tmp/.meshconf-dawncfg)" || { rm -f "$f"; printf 'failed'; return; }
 	uclient-fetch -q -O "$f" -T 10 "http://$ip:$port/cgi/sync?action=dawn-get&key=$key" >/dev/null 2>&1 || {
 		rm -f "$f"
 		printf 'failed'
@@ -1414,7 +1428,7 @@ sync_dawn_push()
 	[ -x /etc/init.d/dawn ] || { printf 'skipped'; return; }
 	[ -r /etc/config/dawn ] || { printf 'skipped'; return; }
 
-	f=/tmp/.meshconf-dawnput.$$
+	f="$(mc_tmp /tmp/.meshconf-dawnput)" || { printf 'failed'; return; }
 	if ! http_post_file "http://$ip:$port/cgi/sync?action=dawn-put&key=$key" /etc/config/dawn "$f"; then
 		rm -f "$f"
 		printf 'failed'
@@ -1427,7 +1441,7 @@ sync_dawn_push()
 
 sync_peer()
 {
-	local args="$1" ip dir key port f cfg bytes saved staggered
+	local args="$1" ip dir key port f cfg bytes saved staggered ucidir
 	json_load "$args" 2>/dev/null || { printf '{"success":false,"error":"bad arguments"}'; return; }
 	json_get_var ip ip
 	json_get_var dir direction
@@ -1443,10 +1457,17 @@ sync_peer()
 	port="$(sync_port)"
 
 	if [ "$dir" = "pull" ]; then
-		f=/tmp/.meshconf-pull.$$
-		cfg=/tmp/.meshconf-pullcfg.$$
-		uclient-fetch -q -O "$f" -T 30 "http://$ip:$port/cgi/sync?action=get&key=$key" >/dev/null 2>&1 || {
+		f="$(mc_tmp /tmp/.meshconf-pull)" || {
+			printf '{"success":false,"error":"cannot create a temporary file"}'
+			return
+		}
+		cfg="$(mc_tmp /tmp/.meshconf-pullcfg)" || {
 			rm -f "$f"
+			printf '{"success":false,"error":"cannot create a temporary file"}'
+			return
+		}
+		uclient-fetch -q -O "$f" -T 30 "http://$ip:$port/cgi/sync?action=get&key=$key" >/dev/null 2>&1 || {
+			rm -f "$f" "$cfg"
 			printf '{"success":false,"error":"peer did not answer (offline, or a different sync key)"}'
 			return
 		}
@@ -1462,13 +1483,19 @@ sync_peer()
 			meshconf_rewrite_channels "$cfg" && staggered=1
 		fi
 
-		mkdir -p /tmp/.meshconf-uci 2>/dev/null
-		cp -f "$cfg" /tmp/.meshconf-uci/wireless 2>/dev/null
-		if ! uci -c /tmp/.meshconf-uci show wireless >/dev/null 2>&1; then
+		ucidir="$(mktemp -d /tmp/.meshconf-uci.XXXXXX 2>/dev/null)"
+		if [ -z "$ucidir" ]; then
 			rm -f "$cfg"
+			printf '{"success":false,"error":"cannot create a temporary directory"}'
+			return
+		fi
+		cp -f "$cfg" "$ucidir/wireless" 2>/dev/null
+		if ! uci -c "$ucidir" show wireless >/dev/null 2>&1; then
+			rm -rf "$ucidir" "$cfg"
 			printf '{"success":false,"error":"peer configuration does not parse as UCI"}'
 			return
 		fi
+		rm -rf "$ucidir"
 
 		cp -f "$WIFI" "$BAK" 2>/dev/null
 		cp -f "$cfg" "$WIFI" 2>/dev/null || { rm -f "$cfg"; printf '{"success":false,"error":"could not write the wireless config"}'; return; }
@@ -1487,7 +1514,10 @@ sync_peer()
 		return
 	fi
 
-	f=/tmp/.meshconf-push.$$
+	f="$(mc_tmp /tmp/.meshconf-push)" || {
+		printf '{"success":false,"error":"cannot create a temporary file"}'
+		return
+	}
 	if ! http_post_file "http://$ip:$port/cgi/sync?action=put&key=$key" "$WIFI" "$f"; then
 		rm -f "$f"
 		printf '{"success":false,"error":"upload failed (peer offline, wrong key, or no http client)"}'
