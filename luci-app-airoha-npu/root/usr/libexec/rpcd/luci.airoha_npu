@@ -383,6 +383,12 @@ _gdm_json() {
 
 # JSON for one CDM engine: TX_OK +0x00, RXCPU_OK +0x10, RXHWF_OK +0x14,
 # RXCPU_DROP +0x20, RXHWF_DROP +0x24.
+#
+# The +0x00 word keeps the JSON key "tx" (renaming it would break a device
+# still running this older backend behind a newer view), but the UI shows it as
+# "Total received": it is a per-engine total of its own and is NOT the sum of
+# the CPU/HW delivery split - on the two test boards it advances on a different
+# frame stream and can stay far below rx_cpu.
 _cdm_json() {
 	local reg="$1" base="$2" tx rxcpu rxhwf rxcpud rxhwfd
 	tx=$(_devmem32_at "$base" 0x00) || return 1

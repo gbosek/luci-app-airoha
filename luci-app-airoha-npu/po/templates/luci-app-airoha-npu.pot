@@ -791,3 +791,6 @@ msgstr ""
 
 msgid "Link down"
 msgstr ""
+
+msgid "Total received"
+msgstr ""

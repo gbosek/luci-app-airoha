@@ -792,3 +792,6 @@ msgstr "已连接"
 
 msgid "Link down"
 msgstr "未连接"
+
+msgid "Total received"
+msgstr "总接收"

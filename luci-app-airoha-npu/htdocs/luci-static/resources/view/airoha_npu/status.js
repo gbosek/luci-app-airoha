@@ -788,7 +788,14 @@ function renderCdmCard(c) {
 		}),
 		aui.row(_('CPU path'), aui.fmtK(cpu)),
 		aui.row(_('HW forwarded'), aui.fmtK(hwf)),
-		aui.row('TX', aui.fmtK(c.tx))
+		// Register +0x00 of this CDM, presented as a total in its own right.
+		// It is NOT the sum of the CPU/HW delivery split above - on both test
+		// boards it runs on a separate frame stream and can sit far below
+		// rx_cpu - so the three lines must never be added up.
+		// The JSON key stays `tx`: the backend is deployed by hand to two
+		// devices, so renaming the field would break a device that is still
+		// running the old backend with a new frontend.
+		aui.row(_('Total received'), aui.fmtK(c.tx))
 	];
 	if ((Number(c.rx_cpu_drop) || 0) > 0) body.push(aui.row(_('CPU dropped'), aui.fmtK(c.rx_cpu_drop), 'ai-err'));
 	if ((Number(c.rx_hwf_drop) || 0) > 0) body.push(aui.row(_('HW dropped'), aui.fmtK(c.rx_hwf_drop), 'ai-err'));
