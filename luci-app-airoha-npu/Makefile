@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 
 LUCI_NAME:=luci-app-airoha-npu
 PKG_VERSION:=2.0.0
-PKG_RELEASE:=5
+PKG_RELEASE:=6
 PKG_LICENSE:=Apache-2.0
 PKG_MAINTAINER:=XR1710G Maintainer
 TITLE:=LuCI Airoha XR1710G / XG2010G Status
@@ -16,6 +16,36 @@ LUCI_DESCRIPTION:=Unified Airoha XR1710G and XG2010G SoC/NPU status app with CPU
 LUCI_DEPENDS:=+luci-base +kmod-br-netfilter
 
 include $(TOPDIR)/feeds/luci/luci.mk
+
+# Ship the two boot-time scripts with the exec bit *verified*.
+#
+# This feed is checked out with core.filemode=false on more than one build host,
+# which drops the exec bit recorded in git: the file then lands in the tree as
+# 0644/0664 and every path that copies it verbatim (image `files/` overlays,
+# `cp` without -p, ...) propagates that. /etc/rc.d/S89airoha-npu was present
+# and enabled while /etc/init.d/airoha-npu was 0664, so boot ran it as
+# "Permission denied" (rc 126) and the persisted CPU governor was never
+# re-applied — the settings looked like they reset on every reboot.
+#
+# $(INSTALL_BIN) alone does not catch it: it chmods the *destination*, so a
+# build that never goes through this recipe still ships a dead script. Fail
+# loudly here instead of shipping a service that cannot start.
+#
+# $(1) source, $(2) destination
+define Npu/install-exec
+	$(INSTALL_DIR) $(dir $(2))
+	[ -f $(1) ] || { echo "luci-app-airoha-npu: missing source $(1)" >&2; exit 1; }
+	[ -x $(1) ] || { \
+		echo "luci-app-airoha-npu: $(1) has no exec bit (mode $$(stat -c '%a' $(1) 2>/dev/null)); the build host lost it (core.filemode=false?) and the service cannot start" >&2; \
+		exit 1; \
+	}
+	$(INSTALL_BIN) $(1) $(2)
+	chmod 0755 $(2)
+	[ -x $(2) ] || { \
+		echo "luci-app-airoha-npu: $(2) shipped without the exec bit (mode $$(stat -c '%a' $(2) 2>/dev/null))" >&2; \
+		exit 1; \
+	}
+endef
 
 define Package/$(LUCI_NAME)/install
 	# Install the unified SoC/NPU view.
@@ -32,9 +62,8 @@ define Package/$(LUCI_NAME)/install
 	$(INSTALL_DATA) ./root/etc/config/npu-monitor $(1)/etc/config/
 	$(INSTALL_DATA) ./root/etc/config/airoha_npu $(1)/etc/config/
 
-	# Install init.d script (executable)
-	$(INSTALL_DIR) $(1)/etc/init.d
-	$(INSTALL_BIN) ./root/etc/init.d/npu-jitter $(1)/etc/init.d/
+	# Install init.d scripts (executable, exec bit verified)
+	$(call Npu/install-exec,./root/etc/init.d/npu-jitter,$(1)/etc/init.d/npu-jitter)
 
 	# Install NPU jitter daemon (executable)
 	$(INSTALL_DIR) $(1)/usr/libexec
@@ -62,8 +91,7 @@ define Package/$(LUCI_NAME)/install
 	# Install init script that re-applies persisted CPU governor / max_freq at boot.
 	# Bake the rc.d symlink so the service is enabled on a freshly flashed image too
 	# (the postinst 'enable' only runs on a running device, not during image build).
-	$(INSTALL_DIR) $(1)/etc/init.d
-	$(INSTALL_BIN) ./root/etc/init.d/airoha-npu $(1)/etc/init.d/
+	$(call Npu/install-exec,./root/etc/init.d/airoha-npu,$(1)/etc/init.d/airoha-npu)
 	$(INSTALL_DIR) $(1)/etc/rc.d
 	ln -sf ../init.d/airoha-npu $(1)/etc/rc.d/S89airoha-npu
 endef
@@ -88,8 +116,17 @@ rm -f /etc/sysctl.d/10-bridge-offload.conf /etc/sysctl.d/99-bridge-offload.conf
 /etc/init.d/npu-jitter enable 2>/dev/null
 /etc/init.d/npu-jitter start 2>/dev/null
 
+# Self-heal: an image built from a checkout that lost the exec bit ships
+# /etc/init.d/airoha-npu as 0664, and rc.common then fails with rc 126 without
+# logging anything. Re-assert both the bit and the rc.d link here.
+sed -i 's/\r$$//' /etc/init.d/airoha-npu 2>/dev/null
+chmod 0755 /etc/init.d/airoha-npu 2>/dev/null
+chmod 0755 /etc/init.d/npu-jitter 2>/dev/null
+chmod 0755 /usr/libexec/rpcd/luci.airoha_npu 2>/dev/null
+
 # Enable the boot-time CPU settings apply script (runs at next reboot)
 /etc/init.d/airoha-npu enable 2>/dev/null
+[ -e /etc/rc.d/S89airoha-npu ] || ln -sf ../init.d/airoha-npu /etc/rc.d/S89airoha-npu 2>/dev/null
 
 # Clear LuCI cache so the new menu entries are picked up
 rm -f /tmp/luci-indexcache.*
