@@ -16,13 +16,18 @@
 _run_with_deadline() {
 	local seconds="$1"
 	local tag="$2"
-	local output="/tmp/airoha-common.${tag}.$$.out"
-	local done="/tmp/airoha-common.${tag}.$$.done"
-	local child_file="/tmp/airoha-common.${tag}.$$.child"
+	local base output done child_file
 	local worker timer child rc
 	shift 2
 
-	rm -f "$output" "$done" "$child_file"
+	# /tmp is world-writable and the caller (rpcd) runs as root: a name built
+	# from $$ is guessable, and a symlink planted there would be followed by
+	# the redirections below. mktemp gives an unpredictable base instead.
+	base="$(mktemp "/tmp/airoha-common.${tag}.XXXXXX" 2>/dev/null)" || return 1
+	rm -f "$base"
+	output="$base.out"
+	done="$base.done"
+	child_file="$base.child"
 
 	(
 		"$@" >"$output" 2>/dev/null &
@@ -82,8 +87,16 @@ airoha_has_wifi() {
 	return 1
 }
 
+# `strings` walks the whole firmware blob (hundreds of kB) and getStatus is
+# polled every few seconds, so the version is resolved once per boot and keyed
+# on the blob it came from. A blob that is not there yet is not cached - an
+# early call during boot must not pin "Unknown" for the rest of the uptime.
+airoha_npu_version_cache=/tmp/airoha-npu-version.cache
+
 airoha_npu_version() {
-	local firmware name
+	local firmware name version
+	local cached_fw="" cached_ver=""
+
 	name=$(airoha_dt_read "soc/npu@1e900000/firmware-name")
 	if [ -n "$name" ]; then
 		firmware="/lib/firmware/$name"
@@ -93,8 +106,19 @@ airoha_npu_version() {
 	else
 		firmware=/lib/firmware/airoha/en7581_npu_rv32.bin
 	fi
-	local version
+
+	if [ -r "$airoha_npu_version_cache" ]; then
+		{ read -r cached_fw; read -r cached_ver; } < "$airoha_npu_version_cache" 2>/dev/null
+		if [ -n "$cached_ver" ] && [ "$cached_fw" = "$firmware" ]; then
+			printf '%s' "$cached_ver"
+			return 0
+		fi
+	fi
+
 	version=$(strings "$firmware" 2>/dev/null | grep -oE '([0-9]+\.[0-9]+\.[0-9]+-)?TLB[0-9.]+[-_v0-9]*' | head -1)
+	if [ -n "$version" ]; then
+		printf '%s\n%s\n' "$firmware" "$version" > "$airoha_npu_version_cache" 2>/dev/null
+	fi
 	printf '%s' "${version:-Unknown}"
 }
 
