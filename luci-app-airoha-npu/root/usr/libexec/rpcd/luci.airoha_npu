@@ -332,6 +332,117 @@ get_token_info() {
 	' "$token_file" 2>/dev/null || printf '{"token_count":0,"token_size":0,"npu_active":false,"tx_queues":[],"station_counts":[%s],"has_wifi":%s}' "$sta_json" "$has_wifi"
 }
 
+# ---------------------------------------------------------------------------
+# Frame Engine (GDM / CDM) counters
+#
+# The frame-engine register block (0x1fb50000 on AN7581/EN7581) has no debugfs
+# view, so these counters are read straight from the registers with the busybox
+# devmem applet. The addresses are the SoC's, not the board's: the XR1710G
+# (WiFi router) and the Nokia XG-040G-MD (PON ONU) expose the same layout, so
+# one set of offsets serves both. A build without devmem or /dev/mem reports
+# the block as unavailable instead of rendering an empty or bogus one.
+#
+#   GDM - the Ethernet data MACs. On the XR1710G the three GDMs are the
+#         internal-switch CPU port, the USXGMII WAN and the USXGMII LAN2; on
+#         the Nokia they are the switch CPU port, the PON uplink and lan1.
+#         The frontend labels each card from the device-tree topology, so the
+#         same register block reads correctly on both boards.
+#   CDM - the CPU DMA engines. The RX split (CPU path vs PPE-forwarded) is the
+#         hardware-offload ratio the UI shows.
+# ---------------------------------------------------------------------------
+
+# One 32-bit register read. Prints the decimal value, or nothing with rc 1 when
+# devmem is missing or the read did not return a plain word - a failed read
+# must never be folded into the arithmetic below as an empty string.
+_devmem32() {
+	local v
+	command -v devmem >/dev/null 2>&1 || return 1
+	v=$(devmem "$1" 2>/dev/null) || return 1
+	case "$v" in
+		0x[0-9a-fA-F]*) printf '%s' "$((v))" ;;
+		[0-9]*) printf '%s' "$v" ;;
+		*) return 1 ;;
+	esac
+}
+
+# Register at <base> + <offset>; both accept 0x hex or decimal.
+_devmem32_at() {
+	_devmem32 "$(printf '0x%x' $(( ($1) + ($2) )))"
+}
+
+# JSON for one GDM port: TX_OK +0x04, TX_DROP +0x08, RX_OK +0x48, RX_DROP +0x4c.
+_gdm_json() {
+	local reg="$1" base="$2" tx tx_drop rx rx_drop
+	tx=$(_devmem32_at "$base" 0x04) || return 1
+	tx_drop=$(_devmem32_at "$base" 0x08) || return 1
+	rx=$(_devmem32_at "$base" 0x48) || return 1
+	rx_drop=$(_devmem32_at "$base" 0x4c) || return 1
+	printf '{"reg":%s,"tx":%s,"tx_drop":%s,"rx":%s,"rx_drop":%s}' \
+		"$reg" "$tx" "$tx_drop" "$rx" "$rx_drop"
+}
+
+# JSON for one CDM engine: TX_OK +0x00, RXCPU_OK +0x10, RXHWF_OK +0x14,
+# RXCPU_DROP +0x20, RXHWF_DROP +0x24.
+_cdm_json() {
+	local reg="$1" base="$2" tx rxcpu rxhwf rxcpud rxhwfd
+	tx=$(_devmem32_at "$base" 0x00) || return 1
+	rxcpu=$(_devmem32_at "$base" 0x10) || return 1
+	rxhwf=$(_devmem32_at "$base" 0x14) || return 1
+	rxcpud=$(_devmem32_at "$base" 0x20) || return 1
+	rxhwfd=$(_devmem32_at "$base" 0x24) || return 1
+	printf '{"reg":%s,"tx":%s,"rx_cpu":%s,"rx_hwf":%s,"rx_cpu_drop":%s,"rx_hwf_drop":%s}' \
+		"$reg" "$tx" "$rxcpu" "$rxhwf" "$rxcpud" "$rxhwfd"
+}
+
+get_frame_engine() {
+	local psb pse_used pse_free gdm cdm entry reg base spec
+
+	if ! command -v devmem >/dev/null 2>&1; then
+		printf '{"available":false,"reason":"devmem_unavailable"}'
+		return
+	fi
+
+	# PSE shared buffer: [31:16] buffers in use, [14:0] free.
+	psb=$(_devmem32 0x1fb50104) || {
+		printf '{"available":false,"reason":"register_read_failed"}'
+		return
+	}
+	pse_used=$(( (psb >> 16) & 0xFFFF ))
+	pse_free=$(( psb & 0x7FFF ))
+
+	# GDM register blocks, keyed by the device-tree ethernet@N index so the
+	# frontend can label each card from the same topology the port table uses.
+	# A port that fails to decode is skipped, not fatal.
+	gdm=""
+	for spec in "1:0x1fb50600" "2:0x1fb51600" "4:0x1fb52600"; do
+		reg="${spec%%:*}"
+		base="${spec##*:}"
+		entry=$(_gdm_json "$reg" "$base") || continue
+		[ -z "$gdm" ] || gdm="$gdm,"
+		gdm="$gdm$entry"
+	done
+
+	# CDM engines (CPU DMA).
+	cdm=""
+	for spec in "1:0x1fb50580" "2:0x1fb51580"; do
+		reg="${spec%%:*}"
+		base="${spec##*:}"
+		entry=$(_cdm_json "$reg" "$base") || continue
+		[ -z "$cdm" ] || cdm="$cdm,"
+		cdm="$cdm$entry"
+	done
+
+	# Nothing decoded at all means every address read back as garbage - report
+	# the block as unavailable rather than an empty frame engine.
+	if [ -z "$gdm" ] && [ -z "$cdm" ]; then
+		printf '{"available":false,"reason":"register_read_failed"}'
+		return
+	fi
+
+	printf '{"available":true,"pse":{"used":%s,"free":%s},"gdm":[%s],"cdm":[%s]}' \
+		"$pse_used" "$pse_free" "$gdm" "$cdm"
+}
+
 # Persist CPU governor / max_freq to UCI so the choice survives a reboot.
 _uci_persist_cpu() {
 	uci -q get airoha_npu.@cpu[0] >/dev/null 2>&1 || \
@@ -673,7 +784,7 @@ set_apmode_offload() {
 
 case "$1" in
 	list)
-		echo '{"getStatus":{},"getTopology":{},"getPpeEntries":{},"getTokenInfo":{},"getWifiStats":{},"getVlanOffload":{},"setVlanOffload":{"enabled":"int"},"getPppoeOffload":{},"setPppoeOffload":{"enabled":"int"},"getFlowOffload":{},"setFlowOffload":{"enabled":"int"},"getApModeOffload":{},"setApModeOffload":{"enabled":"int"},"getDeviceMode":{},"setGovernor":{"governor":"str"},"setMaxFreq":{"freq":"int"},"setCpuSettings":{"governor":"str","freq":"int"}}'
+		echo '{"getStatus":{},"getTopology":{},"getPpeEntries":{},"getTokenInfo":{},"getFrameEngine":{},"getWifiStats":{},"getVlanOffload":{},"setVlanOffload":{"enabled":"int"},"getPppoeOffload":{},"setPppoeOffload":{"enabled":"int"},"getFlowOffload":{},"setFlowOffload":{"enabled":"int"},"getApModeOffload":{},"setApModeOffload":{"enabled":"int"},"getDeviceMode":{},"setGovernor":{"governor":"str"},"setMaxFreq":{"freq":"int"},"setCpuSettings":{"governor":"str","freq":"int"}}'
 		;;
 	call)
 		case "$2" in
@@ -691,6 +802,9 @@ case "$1" in
 				;;
 			getTokenInfo)
 				get_token_info
+				;;
+			getFrameEngine)
+				get_frame_engine
 				;;
 			setGovernor)
 				read input
