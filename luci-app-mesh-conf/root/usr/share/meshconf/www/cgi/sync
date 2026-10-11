@@ -21,6 +21,15 @@ BAK="$WIFI.meshconf-bak"
 DAWN_CONF=/etc/config/dawn
 TMPDIR_SYNC=/tmp/meshconf-sync
 
+# uhttpd runs this CGI as root, so a name an unprivileged local process can
+# guess is a write-anywhere primitive: /tmp is world-writable and a symlink
+# planted at the predictable path sends the upload wherever it points. Both the
+# scratch directory and the file inside it are therefore created exclusively.
+scratch_dir()
+{
+	mktemp -d "${TMPDIR_SYNC}.XXXXXX" 2>/dev/null
+}
+
 # uhttpd hands the CGI a minimal environment; without this, uci/head/sed can
 # come back "not found" and the peer sees a 500 instead of a config.
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
@@ -111,7 +120,7 @@ do_get() {
 }
 
 do_put() {
-	local len="$CONTENT_LENGTH" body bytes
+	local len="$CONTENT_LENGTH" work body bytes
 	check_key "$1"
 
 	case "$len" in
@@ -120,15 +129,15 @@ do_put() {
 	[ "$len" -gt 0 ] 2>/dev/null || fail 'empty upload'
 	[ "$len" -le 262144 ] || fail 'upload too large'
 
-	mkdir -p "$TMPDIR_SYNC" 2>/dev/null
-	body="$TMPDIR_SYNC/wireless.$$"
+	work="$(scratch_dir)" || fail 'cannot create a temporary directory'
+	body="$work/wireless"
 	head -c "$len" > "$body" 2>/dev/null
 	bytes="$(wc -c < "$body" 2>/dev/null | tr -d ' ')"
 	[ -n "$bytes" ] || bytes=0
 
 	# Refuse anything that is not a UCI wireless config before it can become
 	# one: a truncated or mangled upload would leave the radio dead.
-	grep -q 'config wifi-device' "$body" 2>/dev/null || { rm -f "$body"; fail 'upload is not a wireless config'; }
+	grep -q 'config wifi-device' "$body" 2>/dev/null || { rm -rf "$work"; fail 'upload is not a wireless config'; }
 
 	# Staggering has to happen on the receiving side: only this unit knows what
 	# it is already using, and the sender always puts its own (already
@@ -142,13 +151,13 @@ do_put() {
 		}
 	fi
 
-	mkdir -p "$TMPDIR_SYNC/uci" 2>/dev/null
-	cp -f "$body" "$TMPDIR_SYNC/uci/wireless" 2>/dev/null
-	uci -c "$TMPDIR_SYNC/uci" show wireless >/dev/null 2>&1 || { rm -f "$body"; fail 'upload does not parse as UCI'; }
+	mkdir -p "$work/uci" 2>/dev/null
+	cp -f "$body" "$work/uci/wireless" 2>/dev/null
+	uci -c "$work/uci" show wireless >/dev/null 2>&1 || { rm -rf "$work"; fail 'upload does not parse as UCI'; }
 
 	cp -f "$WIFI" "$BAK" 2>/dev/null
-	cp -f "$body" "$WIFI" 2>/dev/null || { rm -f "$body"; fail 'could not write the wireless config'; }
-	rm -f "$body"
+	cp -f "$body" "$WIFI" 2>/dev/null || { rm -rf "$work"; fail 'could not write the wireless config'; }
+	rm -rf "$work"
 
 	mkdir -p "$TMPDIR_SYNC/uci" 2>/dev/null
 	uci -q set meshconf.sync.last_sync="$(date +%s 2>/dev/null || echo 0)"
@@ -172,7 +181,7 @@ do_dawn_get() {
 }
 
 do_dawn_put() {
-	local len="$CONTENT_LENGTH" body
+	local len="$CONTENT_LENGTH" work body
 	check_key "$1"
 
 	case "$len" in
@@ -181,21 +190,21 @@ do_dawn_put() {
 	[ "$len" -gt 0 ] 2>/dev/null || fail 'empty upload'
 	[ "$len" -le 262144 ] || fail 'upload too large'
 
-	mkdir -p "$TMPDIR_SYNC" 2>/dev/null
-	body="$TMPDIR_SYNC/dawn.$$"
+	work="$(scratch_dir)" || fail 'cannot create a temporary directory'
+	body="$work/dawn"
 	head -c "$len" > "$body" 2>/dev/null
 
 	# Same shape check as the wireless upload: anything that is not a DAWN
 	# config must not become one.
-	grep -q 'config metric' "$body" 2>/dev/null || { rm -f "$body"; fail 'upload is not a dawn config'; }
+	grep -q 'config metric' "$body" 2>/dev/null || { rm -rf "$work"; fail 'upload is not a dawn config'; }
 
-	mkdir -p "$TMPDIR_SYNC/ucidawn" 2>/dev/null
-	cp -f "$body" "$TMPDIR_SYNC/ucidawn/dawn" 2>/dev/null
-	uci -c "$TMPDIR_SYNC/ucidawn" show dawn >/dev/null 2>&1 || { rm -f "$body"; fail 'upload does not parse as UCI'; }
+	mkdir -p "$work/ucidawn" 2>/dev/null
+	cp -f "$body" "$work/ucidawn/dawn" 2>/dev/null
+	uci -c "$work/ucidawn" show dawn >/dev/null 2>&1 || { rm -rf "$work"; fail 'upload does not parse as UCI'; }
 
 	cp -f "$DAWN_CONF" "$DAWN_CONF.meshconf-bak" 2>/dev/null
-	cp -f "$body" "$DAWN_CONF" 2>/dev/null || { rm -f "$body"; fail 'could not write the dawn config'; }
-	rm -f "$body"
+	cp -f "$body" "$DAWN_CONF" 2>/dev/null || { rm -rf "$work"; fail 'could not write the dawn config'; }
+	rm -rf "$work"
 
 	# DAWN reads its config once, at startup - restarting it has to happen
 	# asynchronously or the caller waits through a restart it did not ask for.
