@@ -530,6 +530,12 @@ _airoha_topology_cache_build() {
 		# from 8 and accepts a silently short topology.
 		printf 'port_count|%s\n' "$port_count"
 		printf 'ts|%s\n' "$now"
+		# INVARIANT: every row ends with a newline, so a complete file always
+		# ends with one. _airoha_topology_cache_valid() rejects a tail the
+		# shell had to rescue from EOF, and that is only sound while this
+		# holds - drop the newline on the last row and every cache would be
+		# rejected, turning a once-a-minute rebuild into one per poll. Perf
+		# only, no wrong values, which is why the check errs that way.
 		printf '%s' "$lan_lines"
 		printf '%s' "$ports"
 	} > "$tmp") 2>/dev/null || { rm -f "$tmp"; return 1; }
