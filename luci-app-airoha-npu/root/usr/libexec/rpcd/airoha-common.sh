@@ -631,9 +631,14 @@ _airoha_topology_cache_valid() {
 	[ -n "$cached_ts" ] || return 0
 	now=$(date +%s 2>/dev/null)
 	case "$now" in ''|*[!0-9]*) return 0 ;; esac
+	# A cache stamped in the future is clock skew, not corruption: without this
+	# the age below goes negative and "-le 60" would accept it by accident.
 	[ "$now" -ge "$cached_ts" ] 2>/dev/null || return 0
 	age=$((now - cached_ts))
-	[ "$age" -le 60 ]
+	# Strictly less than, matching the PPE cache: a 2 s TTL there means
+	# [0, 2), so 60 s here means [0, 60) and a cache is fresh for 60 whole
+	# seconds, expiring on the 61st.
+	[ "$age" -lt 60 ]
 }
 
 # Include split GDM/NBQ children as separate netdevs, never shared MIB samples.
