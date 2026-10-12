@@ -6,6 +6,15 @@
 
 . /usr/libexec/rpcd/airoha-common.sh
 
+# 1 while get_dashboard() is gathering a round whose PPE table was deferred
+# ({"ppe":0}). get_status() reads the flow-table totals from the file published
+# by get_ppe_entries() in that case, because those two greps over the PPE
+# debugfs files cost as much as half of the deferred first paint and read the
+# very same files the table parse already consumed. Only get_dashboard() ever
+# sets it, and it resets it immediately afterwards: the standalone getStatus
+# RPC has no publisher behind it, so it must always read live.
+AIROHA_PPE_DEFERRED=0
+
 # Escape a value before it is embedded in a JSON string literal.
 #
 # Every value that reaches printf below is either read from sysfs or echoed
@@ -139,10 +148,34 @@ get_status() {
 
 	local npu_cores=$(grep -c "airoha-npu-wdt" /proc/interrupts 2>/dev/null)
 
-	# grep -c PATTERN FILE instead of cat FILE | grep -c PATTERN: the pipe cost
-	# a second fork for no benefit, and the output is a bare count either way.
-	local offload_bound=$(grep -c "^[0-9a-fA-F]" /sys/kernel/debug/ppe/bind 2>/dev/null)
-	local offload_total=$(grep -c "^[0-9a-fA-F]" /sys/kernel/debug/ppe/entries 2>/dev/null)
+	# The flow-table totals. Two greps over the PPE debugfs files cost ~0.5 s
+	# on the PON ONU - about half of a deferred first paint - and they read the
+	# same two files the table parse already consumed. When the dashboard
+	# deferred the table, reuse what that parse published (one builtin read);
+	# otherwise read live, which is also the only correct answer for the
+	# standalone getStatus RPC and for the very first dashboard call, before any
+	# counts file exists: showing 0 there would be a visible regression.
+	local offload_bound=0 offload_total=0 _airoha_ppe_counts=""
+	if [ "$AIROHA_PPE_DEFERRED" = 1 ] && [ -r /tmp/luci-airoha-npu.ppe.counts ]; then
+		read -r _airoha_ppe_counts < /tmp/luci-airoha-npu.ppe.counts
+	fi
+	if [ -n "$_airoha_ppe_counts" ]; then
+		# get_status takes no arguments, so reusing the positional parameters
+		# here cannot clobber a caller's.
+		set -- $_airoha_ppe_counts
+		offload_total="${1:-0}"
+		offload_bound="${2:-0}"
+		# A truncated or hand-edited counts file must degrade to 0, never to a
+		# non-numeric token in the JSON below.
+		case "$offload_total" in ''|*[!0-9]*) offload_total=0 ;; esac
+		case "$offload_bound" in ''|*[!0-9]*) offload_bound=0 ;; esac
+	else
+		# grep -c PATTERN FILE instead of cat FILE | grep -c PATTERN: the pipe
+		# cost a second fork for no benefit, and the output is a bare count
+		# either way.
+		offload_bound=$(grep -c "^[0-9a-fA-F]" /sys/kernel/debug/ppe/bind 2>/dev/null)
+		offload_total=$(grep -c "^[0-9a-fA-F]" /sys/kernel/debug/ppe/entries 2>/dev/null)
+	fi
 
 	# NPU memory regions don't change after boot — cache to avoid slow dmesg on every poll
 	local mem_cache="/tmp/npu-mem-regions.json"
@@ -274,6 +307,23 @@ get_topology() {
 	airoha_port_topology_json
 }
 
+# Publish the flow-table totals for the deferred dashboard path, which needs
+# them without touching debugfs. This is the only place that knows them: the
+# counts come out of the same parse that produced the table. Two jsonfilter
+# calls here - on a path that already costs ~2 s - buy a zero-fork `read` on
+# the hot path. Never called for the "PPE unavailable" fallbacks, so an
+# unreadable debugfs cannot publish a fake 0.
+_airoha_ppe_publish_counts() {
+	local total bound tmp
+	total=$(printf '%s' "$1" | jsonfilter -e '@.total' 2>/dev/null)
+	bound=$(printf '%s' "$1" | jsonfilter -e '@.bound' 2>/dev/null)
+	case "$total" in ''|*[!0-9]*) return 0 ;; esac
+	case "$bound" in ''|*[!0-9]*) bound=0 ;; esac
+	tmp=$(mktemp /tmp/luci-airoha-npu.ppe.counts.XXXXXX 2>/dev/null) || return 0
+	printf '%s %s\n' "$total" "$bound" > "$tmp" 2>/dev/null &&
+		mv -f "$tmp" /tmp/luci-airoha-npu.ppe.counts 2>/dev/null || rm -f "$tmp"
+}
+
 get_ppe_entries() {
 	local entries_file="/sys/kernel/debug/ppe/entries"
 	local cache_file="/tmp/luci-airoha-npu.ppe.cache"
@@ -295,7 +345,11 @@ get_ppe_entries() {
 			if [ "$age" -lt "$cache_ttl" ]; then
 				cached_json=$(sed -n '2,$p' "$cache_file" 2>/dev/null)
 				case "$cached_json" in
-					\{*\}) printf '%s' "$cached_json"; return ;;
+					\{*\})
+						_airoha_ppe_publish_counts "$cached_json"
+						printf '%s' "$cached_json"
+						return
+						;;
 				esac
 			fi
 		fi
@@ -340,6 +394,7 @@ get_ppe_entries() {
 			mv -f "$cache_tmp" "$cache_file" 2>/dev/null || rm -f "$cache_tmp"
 		fi
 	fi
+	_airoha_ppe_publish_counts "$parsed"
 	printf '%s' "$parsed"
 }
 
@@ -349,17 +404,48 @@ get_token_info() {
 
 	# Gather per-band WiFi station stats (count, retries, failures)
 	local sta_json="" band
+	# `iw dev` used to run inside the band loop - three execs, ~2 cs each on
+	# the WiFi board - purely to map a band onto its interfaces. It is captured
+	# once here and scanned with shell builtins, so a band that owns no
+	# interface costs no exec at all instead of a guaranteed one.
+	local iw_dev="" ifaces="" ifaces0="" ifaces1="" ifaces2="" stats="" w prev
+	iw_dev=$(iw dev 2>/dev/null)
+	# One pass for all three bands. The capture names an interface as
+	# "Interface <name>", which is what the old per-band awk matched
+	# (/Interface phy0.N-/ { print $2 }); matching only the word right after
+	# the keyword keeps a stray SSID from being mistaken for one.
+	for w in $iw_dev; do
+		if [ "$prev" = Interface ]; then
+			case "$w" in
+				phy0.0-*) ifaces0="$ifaces0 $w" ;;
+				phy0.1-*) ifaces1="$ifaces1 $w" ;;
+				phy0.2-*) ifaces2="$ifaces2 $w" ;;
+			esac
+		fi
+		prev="$w"
+	done
 	for band in 0 1 2; do
-		local stats=$(
-			for iface in $(iw dev 2>/dev/null | awk '/Interface phy0\.'$band'-/{print $2}'); do
-				iw dev "$iface" station dump 2>/dev/null
-			done | awk '
+		case "$band" in
+			0) ifaces="$ifaces0" ;;
+			1) ifaces="$ifaces1" ;;
+			2) ifaces="$ifaces2" ;;
+		esac
+		stats=""
+		# No interfaces: no station dump, and the awk below is skipped too.
+		# Its empty-output case is identical to running it on an empty pipe,
+		# which is what the loop used to do, so the emitted zeros match.
+		if [ -n "$ifaces" ]; then
+			stats=$(
+				for iface in $ifaces; do
+					iw dev "$iface" station dump 2>/dev/null
+				done | awk '
 			BEGIN { n=0; tp=0; tr=0 }
 			/^Station/ { n++ }
 			/tx packets:/ { tp += $3 }
 			/tx retries:/ { tr += $3 }
 			END { printf "%d %d %d", n, tp, tr }'
-		)
+			)
+		fi
 		set -- $stats
 		[ -n "$sta_json" ] && sta_json="${sta_json},"
 		sta_json="${sta_json}{\"band\":${band},\"count\":${1:-0},\"tx_packets\":${2:-0},\"tx_retries\":${3:-0}}"
@@ -890,7 +976,18 @@ get_dashboard() {
 		esac
 	fi
 
-	status=$(get_status)
+	# The deferred round has no fresh parse behind it, but it still wants the
+	# flow-table totals in the status block: point get_status() at the last
+	# published counts instead of the debugfs files. Reset immediately - the
+	# flag must not leak into the standalone getStatus RPC, which has to read
+	# live, nor into any later dashboard round that did ask for PPE.
+	if [ "$want_ppe" = 0 ]; then
+		AIROHA_PPE_DEFERRED=1
+		status=$(get_status)
+		AIROHA_PPE_DEFERRED=0
+	else
+		status=$(get_status)
+	fi
 	[ -n "$status" ] || status='{}'
 	topology=$(airoha_port_topology_json)
 	[ -n "$topology" ] || topology='{}'

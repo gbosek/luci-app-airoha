@@ -255,9 +255,16 @@ airoha_pon_rates() {
 #   0 = no light (LOS asserted) -> echo 1 ; 1 = light present -> echo 0 ; else nothing.
 airoha_pon_los() {
 	local f="/proc/tc3162/los_status"
-	local signal
+	local signal=""
 	if [ -r "$f" ]; then
-		signal=$(cat "$f" 2>/dev/null)
+		# One less fork per poll, in the read shape documented at
+		# _airoha_net_number() below: emptied first because a failed redirect
+		# leaves the variable untouched, and -r guarded because 2>/dev/null
+		# cannot silence the redirect failure itself. A file that reads empty
+		# falls through to the *) branch exactly as an empty $(cat) did.
+		# IFS= because `read` would otherwise strip the leading and trailing
+		# blanks that a plain $(cat) kept - this attribute is compared verbatim.
+		IFS= read -r signal < "$f"
 	else
 		signal=$(awk '$1 == "optical_signal:" { print $2; exit }' /sys/kernel/debug/airoha-xpon-pon0/line 2>/dev/null)
 	fi
@@ -291,10 +298,15 @@ airoha_pon_netdev() {
 # Negotiated link speed (Mbps) of a netdev, empty when unavailable
 # (missing interface, driver error, link down with "-1" reporting).
 _airoha_netdev_speed_mbps() {
-	local dev="$1" s
+	local dev="$1" s=""
 	[ -n "$dev" ] || return 0
 	[ -e "/sys/class/net/$dev" ] || return 0
-	s=$(cat "/sys/class/net/$dev/speed" 2>/dev/null)
+	# The guard above tests the interface directory, not the attribute, so the
+	# read needs its own -r test. Pre-cleared and -r guarded for the reasons
+	# spelled out at _airoha_net_number() below: an unreadable speed file must
+	# report "unavailable", not the previous interface's speed. IFS= keeps the
+	# value byte-identical to the $(cat) it replaces.
+	[ -r "/sys/class/net/$dev/speed" ] && IFS= read -r s < "/sys/class/net/$dev/speed"
 	case "$s" in ''|*[!0-9]*) return 0 ;; esac
 	[ "$s" -gt 0 ] 2>/dev/null || return 0
 	echo "$s"
