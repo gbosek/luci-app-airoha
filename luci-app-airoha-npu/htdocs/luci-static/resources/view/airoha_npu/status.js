@@ -7,6 +7,7 @@
 
 /* ── RPC declarations ── */
 var callNpuStatus = rpc.declare({ object: 'luci.airoha_npu', method: 'getStatus' });
+var callDashboard = rpc.declare({ object: 'luci.airoha_npu', method: 'getDashboard', params: ['ppe'] });
 var callPpeEntries = rpc.declare({ object: 'luci.airoha_npu', method: 'getPpeEntries' });
 var callTokenInfo = rpc.declare({ object: 'luci.airoha_npu', method: 'getTokenInfo' });
 var callSetGovernor = rpc.declare({ object: 'luci.airoha_npu', method: 'setGovernor', params: ['governor'] });
@@ -300,16 +301,49 @@ function renderFreqCard(st) {
 }
 
 /* ── Frequency history chart ──
- * One sample per 5 s poll, 120 samples = 10 minutes of history. The chart is
- * re-rendered on every poll from the module-level buffer, so it survives the
- * card never being rebuilt. */
+ * One sample per 5 s poll, 120 samples = 10 minutes of active history. Samples
+ * survive a page refresh for up to 30 minutes in this tab. A restored run and
+ * a new run can have a time gap; the compact chart intentionally keeps sample
+ * spacing (rather than wall-clock spacing), matching the original chart. */
+var FREQ_HISTORY_KEY = 'airoha_npu.freq_history';
+var FREQ_HISTORY_MAX_AGE_MS = 30 * 60 * 1000;
 var FREQ_HISTORY_MAX = 120;
-var freqHistory = [];
+
+function loadFreqHistory() {
+	var now = Date.now();
+	try {
+		var raw = sessionStorage.getItem(FREQ_HISTORY_KEY);
+		if (!raw) return [];
+		var samples = JSON.parse(raw);
+		if (!Array.isArray(samples)) return [];
+		return samples.filter(function(sample) {
+			return sample && typeof sample === 'object' &&
+				typeof sample.t === 'number' && isFinite(sample.t) && sample.t > 0 &&
+				typeof sample.v === 'number' && isFinite(sample.v) && sample.v > 0 &&
+				sample.t >= now - FREQ_HISTORY_MAX_AGE_MS;
+		}).slice(-FREQ_HISTORY_MAX);
+	} catch (err) {
+		// Storage can be disabled (including privacy modes) or contain stale data.
+		return [];
+	}
+}
+
+function saveFreqHistory() {
+	try {
+		sessionStorage.setItem(FREQ_HISTORY_KEY, JSON.stringify(freqHistory));
+	} catch (err) {
+		// A denied or full storage area must never stop the five-second poll.
+	}
+}
+
+var freqHistory = loadFreqHistory();
 
 function pushFreqSample(khz) {
-	if (!(khz > 0)) return;
-	freqHistory.push(khz);
+	khz = Number(khz);
+	if (!isFinite(khz) || !(khz > 0)) return;
+	freqHistory.push({ t: Date.now(), v: khz });
 	if (freqHistory.length > FREQ_HISTORY_MAX) freqHistory.shift();
+	saveFreqHistory();
 }
 
 /* LuCI's E() uses document.createElement() and cannot create SVG-namespace
@@ -339,7 +373,7 @@ function renderFreqChart(min, max, containerW) {
 	var pts = [], xs = [], ys = [];
 	for (var i = 0; i < n; i++) {
 		var x = padX + (FREQ_HISTORY_MAX - n + i) / (FREQ_HISTORY_MAX - 1) * innerW;
-		var y = yOf(freqHistory[i]);
+		var y = yOf(freqHistory[i].v);
 		xs.push(x); ys.push(y);
 		pts.push(x.toFixed(1) + ',' + y.toFixed(1));
 	}
@@ -1017,15 +1051,12 @@ return view.extend({
 	render: function(data) {
 		data = data || [];
 		aui.ensureCss();
-		// These first-render defaults must mirror the live Promise.all slot order
-		// further down, slot for slot. They are only ever fed the empty array
-		// today (load() returns Promise.resolve([])), so a mismatch would NOT
-		// surface here - it would silently mis-slot real data (e.g. show the
-		// Flow Offload value in the VLAN slot) the moment load() starts
-		// returning data. Whenever the Promise.all order below changes, update
-		// this block in the same commit. Slots 8 (WiFi stats) and 9 (frame
-		// engine) are read only by the live fetch, so they are listed here too
-		// to keep the index map in one piece.
+		// The main live path uses named getDashboard fields and bypasses this
+		// array. These defaults retain the legacy Promise.all slot order used by
+		// the old-backend fallback below. load() currently returns an empty array,
+		// but if it ever starts returning legacy data this index map must still
+		// match that fallback: status, PPE, token, flow, AP mode, device mode,
+		// topology, VLAN, WiFi and frame engine.
 		var st = data[0] || {}, ppe = data[1] || {}, ti = data[2] || {};
 		var flo = data[3] || { enabled: 0 };
 		var apo = data[4] || { enabled: 0 };
@@ -1108,14 +1139,104 @@ return view.extend({
 			})
 		]);
 
-		// Data fetch + DOM update function — called immediately and via poll.
-		// Each RPC call is wrapped with .catch() so one failure doesn't block others.
+		// Data fetch + DOM update functions — called immediately and via poll.
+		// Individual calls are retained only for compatibility with older backends.
 		function _safeCall(promise, fallback) {
 			return promise.catch(function() { return fallback; });
 		}
 
-		var fetchData = L.bind(function() {
-			var requestSequence = ++ppeRequestSequence;
+		function applyData(st, ppe, ti, flo, apo, dm, topo, vo, wifi, fe, requestSequence, deferPpe) {
+			aui.ensureCss();
+			st = st || {};
+			ppe = ppe || {};
+			ti = ti || {};
+			flo = flo || { enabled: 0 };
+			apo = apo || { enabled: 0 };
+			dm = dm || {};
+			topo = topo || {};
+			vo = vo || { enabled: 0 };
+			wifi = wifi || { available: false, bands: [] };
+			fe = fe || { available: false };
+			if (typeof wifi.has_wifi !== 'boolean' && typeof ti.has_wifi === 'boolean')
+				wifi.has_wifi = ti.has_wifi;
+			var bridgeBlocked = isBridgeOffloadBlocked(dm);
+			// deferred:true means "this round did not ask for PPE" (the flow
+			// table is fetched on a slower cadence - see fetchDashboardData).
+			// Leave both the table and latestPpeEntries alone: overwriting them
+			// would flash an empty flow table every 5 s and defeat the point of
+			// keeping the last real snapshot.
+			if (deferPpe !== true && requestSequence > latestPpeRequest) {
+				latestPpeRequest = requestSequence;
+				latestPpeEntries = Array.isArray(ppe.entries) ? ppe.entries : [];
+				updatePpeTable(latestPpeEntries, ppe);
+			}
+			updateSummary(st, ti);
+
+			// CPU info — always re-render (just text rows, no user interaction)
+			var ci = document.getElementById('cpu-info-content');
+			if (ci) { ci.innerHTML = ''; ci.appendChild(renderCpuInfo(st)); }
+
+			// History chart — append one sample per poll and re-render.
+			pushFreqSample(freqState(st).freq);
+			var hc = document.getElementById('cpu-history-content');
+			if (hc) { hc.innerHTML = ''; hc.appendChild(renderFreqChart(st.cpu_min_freq, st.cpu_max_freq, hc.clientWidth)); }
+
+			// Control settings — the selects now always exist, so their presence can
+			// no longer signal "not rendered yet". Rebuild the container whenever the
+			// board's cpufreq availability/reason changes (cpufreq appearing or
+			// disappearing between polls); otherwise update the live values in place,
+			// unless the user has unsaved changes.
+			var cpuReason = cpufreqReason(st);
+			var gs = document.getElementById('cpu-governor-select');
+			if (!gs || cpuReason !== prevCpuReason) {
+				var cc = document.getElementById('cpu-control-content');
+				if (cc) { cc.innerHTML = ''; cc.appendChild(renderControlSettings(st)); }
+				prevCpuReason = cpuReason;
+			} else if (!cpuSettingsDirty) {
+				if (!gs.matches(':focus')) gs.value = st.cpu_governor || '';
+				var fsSel = document.getElementById('cpu-maxfreq-select');
+				if (fsSel && !fsSel.matches(':focus')) {
+					var target = (st.cpu_max_freq || 0).toString();
+					var hasOpt = Array.from(fsSel.options).some(function(o) { return o.value === target; });
+					if (hasOpt) {
+						fsSel.value = target;
+					} else {
+						// Option list is stale (live value not selectable) — rebuild
+						// so renderMaxFreqSelect can inject the current kernel value.
+						var cc = document.getElementById('cpu-control-content');
+						if (cc) { cc.innerHTML = ''; cc.appendChild(renderControlSettings(st)); }
+					}
+				}
+			}
+
+			updateOffloadControl('vlan-offload-select', 'vlan-offload-badge', 'vlan-offload-row', vo.enabled, bridgeBlocked);
+			updateOffloadControl('flow-offload-select', 'flow-offload-badge', 'flow-offload-row', flo.enabled, false);
+			updateOffloadControl('apmode-offload-select', 'apmode-offload-badge', 'apmode-offload-row', apo.enabled, bridgeBlocked);
+
+			var controls = document.getElementById('offload-controls');
+			var controlBoard = String(topo.compatible || '') + ':' + (vo.supported !== false && apo.supported !== false);
+			if (controls && topo.compatible && controls.getAttribute('data-board') !== controlBoard) {
+				controls.replaceChildren(renderOffloadControls(topo, vo, flo, apo, bridgeBlocked));
+				controls.setAttribute('data-board', controlBoard);
+			}
+
+			var engineEl = document.getElementById('engine-status');
+			if (engineEl) engineEl.replaceChildren(renderEngineStatus(st, ppe));
+			var feEl = document.getElementById('frame-engine');
+			if (feEl) feEl.replaceChildren(renderFrameEngine(fe, topo));
+			var epEl = document.getElementById('ethernet-ports');
+			if (epEl) { epEl.innerHTML = ''; epEl.appendChild(renderEthernetPorts(topo)); }
+			var wifiEl = document.getElementById('wifi-detail');
+			if (wifiEl) {
+				wifiEl.replaceChildren();
+				var wifiDetails = renderWifiDetails(wifi, ppe, ti, st);
+				if (wifiDetails) wifiEl.appendChild(wifiDetails);
+			}
+
+			markUpdated();
+		}
+
+		function fetchLegacyData() {
 			return Promise.all([
 				_safeCall(callNpuStatus(), {}),
 				_safeCall(callPpeEntries(), { available: false, entries: [] }),
@@ -1124,106 +1245,80 @@ return view.extend({
 				_safeCall(callGetApModeOffload(), { enabled: 0 }),
 				_safeCall(callGetDeviceMode(), { bridge_offload_blocked: false }),
 				_safeCall(callGetTopology(), {}),
-				// VLAN Offload rejoined as an independent switch; appended at the
-				// END so every existing d[n] index below keeps its meaning.
 				_safeCall(callGetVlanOffload(), { enabled: 0 }),
 				_safeCall(callGetWifiStats(), { available: false, bands: [] }),
-				// Frame Engine (GDM/CDM) appended at the END for the same
-				// reason as VLAN above: every existing d[n] index keeps its
-				// meaning.
 				_safeCall(callFrameEngine(), { available: false, reason: 'request_failed' })
-			]).then(L.bind(function(d) {
-				aui.ensureCss();
-				var st = d[0] || {}, ppe = d[1] || {}, ti = d[2] || {};
-				var flo = d[3] || { enabled: 0 };
-				var apo = d[4] || { enabled: 0 };
-				var dm = d[5] || {};
-				var topo = d[6] || {};
-				var vo = d[7] || { enabled: 0 };
-				var wifi = d[8] || { available: false, bands: [] };
-				if (typeof wifi.has_wifi !== 'boolean' && typeof ti.has_wifi === 'boolean')
-					wifi.has_wifi = ti.has_wifi;
-				var fe = d[9] || { available: false };
-				var bridgeBlocked = isBridgeOffloadBlocked(dm);
-				var entries = Array.isArray(ppe.entries) ? ppe.entries : [];
-				if (requestSequence > latestPpeRequest) {
-					latestPpeRequest = requestSequence;
-					latestPpeEntries = entries;
-					updatePpeTable(latestPpeEntries, ppe);
-				}
-				updateSummary(st, ti);
+			]).then(function(d) {
+				return {
+					st: d[0] || {}, ppe: d[1] || {}, ti: d[2] || {},
+					flo: d[3] || {}, apo: d[4] || {}, dm: d[5] || {},
+					topo: d[6] || {}, vo: d[7] || {}, wifi: d[8] || {}, fe: d[9] || {}
+				};
+			});
+		}
 
-				// CPU info — always re-render (just text rows, no user interaction)
-				var ci = document.getElementById('cpu-info-content');
-				if (ci) { ci.innerHTML = ''; ci.appendChild(renderCpuInfo(st)); }
+		// PPE is by far the most expensive probe on the board (a 1024-entry
+		// debugfs snapshot + awk, ~2 s on the PON ONU), so `ppe:0` tells the
+		// backend to skip it entirely. The reply then carries deferred:true,
+		// which applyData uses to keep the previous flow table on screen.
+		function fetchDashboardData(includePpe) {
+			var deferred = { available: false, entries: [], total: 0, deferred: true };
+			return callDashboard(includePpe ? 1 : 0).then(function(dashboard) {
+				// No getDashboard: an older backend. It always returns the whole
+				// page - including PPE - in one go, so the caller's PPE cadence
+				// cannot be honoured; fall back to the 10 individual calls and
+				// let them behave exactly as they did before.
+				if (!dashboard) return fetchLegacyData();
+				var ppe = dashboard.ppe || {};
+				return {
+					st: dashboard.status || {},
+					ppe: includePpe ? ppe : deferred,
+					ti: dashboard.token || {},
+					flo: dashboard.flow_offload || {},
+					apo: dashboard.apmode_offload || {},
+					dm: dashboard.device_mode || {},
+					topo: dashboard.topology || {},
+					vo: dashboard.vlan_offload || {},
+					wifi: dashboard.wifi || {},
+					fe: dashboard.frame_engine || {},
+					deferPpe: !includePpe
+				};
+			}, function() {
+				return fetchLegacyData();
+			});
+		}
 
-				// History chart — append one sample per poll and re-render.
-				pushFreqSample(freqState(st).freq);
-				var hc = document.getElementById('cpu-history-content');
-				if (hc) { hc.innerHTML = ''; hc.appendChild(renderFreqChart(st.cpu_min_freq, st.cpu_max_freq, hc.clientWidth)); }
-
-				// Control settings — the selects now always exist, so their presence can
-				// no longer signal "not rendered yet". Rebuild the container whenever the
-				// board's cpufreq availability/reason changes (cpufreq appearing or
-				// disappearing between polls); otherwise update the live values in place,
-				// unless the user has unsaved changes.
-				var cpuReason = cpufreqReason(st);
-				var gs = document.getElementById('cpu-governor-select');
-				if (!gs || cpuReason !== prevCpuReason) {
-					var cc = document.getElementById('cpu-control-content');
-					if (cc) { cc.innerHTML = ''; cc.appendChild(renderControlSettings(st)); }
-					prevCpuReason = cpuReason;
-				} else if (!cpuSettingsDirty) {
-					if (!gs.matches(':focus')) gs.value = st.cpu_governor || '';
-					var fsSel = document.getElementById('cpu-maxfreq-select');
-					if (fsSel && !fsSel.matches(':focus')) {
-						var target = (st.cpu_max_freq || 0).toString();
-						var hasOpt = Array.from(fsSel.options).some(function(o) { return o.value === target; });
-						if (hasOpt) {
-							fsSel.value = target;
-						} else {
-							// Option list is stale (live value not selectable) — rebuild
-							// so renderMaxFreqSelect can inject the current kernel value.
-							var cc = document.getElementById('cpu-control-content');
-							if (cc) { cc.innerHTML = ''; cc.appendChild(renderControlSettings(st)); }
-						}
-					}
-				}
-
-				updateOffloadControl('vlan-offload-select', 'vlan-offload-badge', 'vlan-offload-row', vo.enabled, bridgeBlocked);
-				updateOffloadControl('flow-offload-select', 'flow-offload-badge', 'flow-offload-row', flo.enabled, false);
-				updateOffloadControl('apmode-offload-select', 'apmode-offload-badge', 'apmode-offload-row', apo.enabled, bridgeBlocked);
-
-				var controls = document.getElementById('offload-controls');
-				var controlBoard = String(topo.compatible || '') + ':' + (vo.supported !== false && apo.supported !== false);
-				if (controls && topo.compatible && controls.getAttribute('data-board') !== controlBoard) {
-					controls.replaceChildren(renderOffloadControls(topo, vo, flo, apo, bridgeBlocked));
-					controls.setAttribute('data-board', controlBoard);
-				}
-
-				var engineEl = document.getElementById('engine-status');
-				if (engineEl) engineEl.replaceChildren(renderEngineStatus(st, ppe));
-				var feEl = document.getElementById('frame-engine');
-				if (feEl) feEl.replaceChildren(renderFrameEngine(fe, topo));
-				var epEl = document.getElementById('ethernet-ports');
-				if (epEl) { epEl.innerHTML = ''; epEl.appendChild(renderEthernetPorts(topo)); }
-				var wifiEl = document.getElementById('wifi-detail');
-				if (wifiEl) {
-					wifiEl.replaceChildren();
-					var wifiDetails = renderWifiDetails(wifi, ppe, ti, st);
-					if (wifiDetails) wifiEl.appendChild(wifiDetails);
-				}
-
-				markUpdated();
-			}, this)).catch(function(err) {
+		function runFetch(includePpe) {
+			var requestSequence = ++ppeRequestSequence;
+			return fetchDashboardData(includePpe).then(function(data) {
+				applyData(data.st, data.ppe, data.ti, data.flo, data.apo, data.dm,
+					data.topo, data.vo, data.wifi, data.fe, requestSequence, data.deferPpe);
+			}).catch(function(err) {
 				console.error('[airoha_npu] fetchData error:', err);
 			});
-		}, this);
+		}
 
-		// Fetch data immediately (page shows with defaults, then updates)
-		fetchData();
+		// Poll cadence: the flow table does not need 5 s resolution, and it is
+		// the single most expensive probe on the board. Every 4th cycle (i.e.
+		// about every 20 s) asks for PPE; the three cycles in between skip it,
+		// which is what makes the periodic poll cheap.
+		var PPE_POLL_EVERY = 4;
+		var pollCount = 0;
+
+		function pollFetch() {
+			pollCount++;
+			return runFetch(pollCount % PPE_POLL_EVERY === 1);
+		}
+
+		// First paint is deliberately two requests, in order: the fast half
+		// (ports, CPU, NPU, frame engine - well under a second) renders as soon
+		// as it lands, then the flow table is fetched separately. Firing both at
+		// once would just put the expensive call back on the critical path.
+		runFetch(false).then(function() {
+			return runFetch(true);
+		});
 		// Poll for periodic updates
-		poll.add(fetchData, 5);
+		poll.add(pollFetch, 5);
 
 		return view;
 	},
