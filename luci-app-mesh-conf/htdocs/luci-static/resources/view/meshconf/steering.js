@@ -65,7 +65,16 @@ var css = [
 	'@media(max-width:720px){.nm-title{flex-direction:column;align-items:flex-start;gap:var(--ds-sp-1)}}'
 ].join('\n');
 
+/* Dark re-tuning. Applied when isDarkMode() detects a dark page background.
+ * It carries the surfaces, text and border as well as the semantic accents:
+ * the `.meshconf-page` block above resolves its surfaces/text through theme
+ * variables, and on Argon none of those exist, so what actually applies are the
+ * light fallbacks - restating them here is the only thing that keeps a dark
+ * page from rendering white panels with near-black text. See ds-tokens.js. */
 var darkVars = dsTokens.dark;
+
+/* Whether the media-query listener below has been installed already. */
+var schemeWatched = false;
 
 function isDarkMode() {
 	/* Probe order matters: the first element with an opaque background wins.
@@ -108,6 +117,8 @@ function isDarkMode() {
 	return false;
 }
 
+/* Rebuilt from scratch on every render (render() and the poll callback both
+ * call it), so the palette always reflects the probe at that moment. */
 function injectCSS() {
 	var el = document.getElementById('meshconf-css');
 	if (!el) {
@@ -116,6 +127,20 @@ function injectCSS() {
 		document.head.appendChild(el);
 	}
 	el.textContent = css + (isDarkMode() ? '\n' + darkVars : '');
+
+	/* Follow a live OS colour-scheme switch. With Argon's default mode='normal'
+	 * the dark palette is delivered inside `@media (prefers-color-scheme: dark)`,
+	 * so a user who flips their system theme expects the page to follow without
+	 * a reload. Registered once: the guard matters because injectCSS() itself
+	 * runs on every render. */
+	if (!schemeWatched) {
+		schemeWatched = true;
+		try {
+			var mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+			if (mq && mq.addEventListener)
+				mq.addEventListener('change', injectCSS);
+		} catch (e) {}
+	}
 }
 
 /* ---------------------------------------------------------------------------
