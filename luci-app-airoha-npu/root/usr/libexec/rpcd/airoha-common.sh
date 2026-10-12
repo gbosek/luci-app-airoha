@@ -143,8 +143,13 @@ airoha_ppe_parse() {
 # ---------------------------------------------------------------------------
 
 # Minimal JSON string sanitiser: drop quotes, backslashes and newlines.
+# One tr instead of three: on the topology hot path this helper ran 6 times per
+# port, so the old chain cost 18 execs per port for a job one call can do.
+# The set is the union of the old three ('"' , '\\', then '\n\r') and is quoted
+# so tr - not the shell - sees the backslash: '\\' is tr's escape for one
+# backslash, '\r' and '\n' its escapes for CR and LF.
 _airoha_json_str() {
-	printf '%s' "$1" | tr -d '"' | tr -d '\\' | tr -d '\n\r'
+	printf '%s' "$1" | tr -d '"\\\r\n'
 }
 
 # airoha_dt_read <relpath> — first NUL-terminated string of the DT property.
@@ -278,8 +283,16 @@ airoha_pon_los() {
 # GPON ONU state (e.g. "O5"), or nothing.
 airoha_pon_onu_state() {
 	local f="/proc/xgpon/state"
+	local state=""
 	if [ -r "$f" ]; then
-		cat "$f" 2>/dev/null
+		# One less fork per poll, in the read shape documented at
+		# _airoha_net_number() below: emptied first because a failed redirect
+		# leaves the variable untouched, and -r guarded because 2>/dev/null
+		# cannot silence the redirect failure itself. IFS= because the value is
+		# emitted verbatim. The guard keeps an empty file from printing a bare
+		# newline that a plain $(cat) would not have produced.
+		IFS= read -r state < "$f"
+		[ -n "$state" ] && printf '%s\n' "$state"
 	else
 		awk '$1 == "onu_state:" && $2 ~ /^O[1-9]$/ { print $2; exit }' \
 			/sys/kernel/debug/airoha-xpon-pon0/registration 2>/dev/null

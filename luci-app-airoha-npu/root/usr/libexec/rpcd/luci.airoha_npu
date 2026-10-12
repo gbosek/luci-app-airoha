@@ -965,6 +965,7 @@ get_dashboard() {
 	local want_ppe=1
 	local status topology ppe token wifi frame_engine
 	local flow_offload apmode_offload vlan_offload device_mode
+	local dir
 
 	# jsonfilter prints nothing when the key is absent, and exits non-zero on
 	# malformed input; both must fall through to "fetch PPE" (the default),
@@ -976,6 +977,79 @@ get_dashboard() {
 		esac
 	fi
 
+	# One rpcd child, ten independent probes. Running them back to back ADDS
+	# their waits: measured on the WiFi board, that made the first paint slower
+	# than the ten concurrent XHRs this call replaced. So they are fanned out
+	# into background subshells and their waits overlap. The browser cannot do
+	# the same - HTTP/1.1 caps it at about six in flight - which is the whole
+	# reason the parallelism lives here.
+	dir=$(mktemp -d /tmp/luci-airoha-npu.dash.XXXXXX 2>/dev/null)
+	if [ -n "$dir" ] && [ -d "$dir" ]; then
+		# Every job owns its stdout: a child that inherited rpcd's stdout would
+		# interleave a segment into the middle of the reply.
+		# AIROHA_PPE_DEFERRED is sampled when this job forks, so it has to be 1
+		# before the `&` and can go back to 0 right after - that is what makes
+		# the status probe reuse the published counts, while every other job,
+		# forked later, still reads live. A round that did ask for PPE must
+		# NOT reuse them: its table is fresh, so its totals have to be too.
+		[ "$want_ppe" = 0 ] && AIROHA_PPE_DEFERRED=1
+		{ get_status >"$dir/status" 2>/dev/null; } &
+		AIROHA_PPE_DEFERRED=0
+		{ airoha_port_topology_json >"$dir/topology" 2>/dev/null; } &
+		if [ "$want_ppe" = 0 ]; then
+			# Nothing to launch: the deferred marker is a constant, so this
+			# round costs no debugfs copy, no awk and no cache lookup at all.
+			printf '%s' '{"available":false,"entries":[],"total":0,"deferred":true}' > "$dir/ppe"
+		else
+			{ get_ppe_entries >"$dir/ppe" 2>/dev/null; } &
+		fi
+		{ get_token_info >"$dir/token" 2>/dev/null; } &
+		{ airoha_wifi_stats_json >"$dir/wifi" 2>/dev/null; } &
+		{ get_frame_engine >"$dir/frame_engine" 2>/dev/null; } &
+		{ get_flow_offload >"$dir/flow_offload" 2>/dev/null; } &
+		{ get_apmode_offload >"$dir/apmode_offload" 2>/dev/null; } &
+		{ get_vlan_offload >"$dir/vlan_offload" 2>/dev/null; } &
+		{ get_device_mode >"$dir/device_mode" 2>/dev/null; } &
+		wait
+
+		# Ten $(cat) to collect the segments, ~7 cs all together: deliberate,
+		# and paid for many times over by the ~100 cs the overlap saves. Each
+		# segment keeps its own empty -> {} guard, so a probe that printed
+		# nothing still cannot corrupt the document.
+		status=$(cat "$dir/status" 2>/dev/null)
+		[ -n "$status" ] || status='{}'
+		topology=$(cat "$dir/topology" 2>/dev/null)
+		[ -n "$topology" ] || topology='{}'
+		ppe=$(cat "$dir/ppe" 2>/dev/null)
+		[ -n "$ppe" ] || ppe='{}'
+		token=$(cat "$dir/token" 2>/dev/null)
+		[ -n "$token" ] || token='{}'
+		wifi=$(cat "$dir/wifi" 2>/dev/null)
+		[ -n "$wifi" ] || wifi='{}'
+		frame_engine=$(cat "$dir/frame_engine" 2>/dev/null)
+		[ -n "$frame_engine" ] || frame_engine='{}'
+		flow_offload=$(cat "$dir/flow_offload" 2>/dev/null)
+		[ -n "$flow_offload" ] || flow_offload='{}'
+		apmode_offload=$(cat "$dir/apmode_offload" 2>/dev/null)
+		[ -n "$apmode_offload" ] || apmode_offload='{}'
+		vlan_offload=$(cat "$dir/vlan_offload" 2>/dev/null)
+		[ -n "$vlan_offload" ] || vlan_offload='{}'
+		device_mode=$(cat "$dir/device_mode" 2>/dev/null)
+		[ -n "$device_mode" ] || device_mode='{}'
+
+		# Only this call's directory, never a /tmp/luci-airoha-npu.dash.* sweep:
+		# concurrent dashboards each own a distinct one, so a glob would delete
+		# a live call's files, while an orphan from a killed call is harmless on
+		# tmpfs.
+		rm -rf "$dir"
+
+		printf '{"status":%s,"topology":%s,"ppe":%s,"token":%s,"wifi":%s,"frame_engine":%s,"flow_offload":%s,"apmode_offload":%s,"vlan_offload":%s,"device_mode":%s}' \
+			"$status" "$topology" "$ppe" "$token" "$wifi" "$frame_engine" \
+			"$flow_offload" "$apmode_offload" "$vlan_offload" "$device_mode"
+		return
+	fi
+
+	# No mktemp -d (or it failed): fall back to the serial shape, unchanged.
 	# The deferred round has no fresh parse behind it, but it still wants the
 	# flow-table totals in the status block: point get_status() at the last
 	# published counts instead of the debugfs files. Reset immediately - the
