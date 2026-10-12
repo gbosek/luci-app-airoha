@@ -93,7 +93,7 @@ var COMPONENT_CSS = [
 	'.ai-badge{display:inline-flex;align-items:center;min-height:18px;padding:0 var(--ds-sp-2);border-radius:var(--ds-r-sm);background:var(--ds-surface-sunken);color:var(--ds-text-muted);font-family:var(--ds-mono);font-size:var(--ds-fs-xs);font-weight:650}',
 	'.ai-badge--bnd{background:var(--ds-info-tint);color:var(--ai-npu);border:1px solid var(--ds-info-line)}',
 	'.ai-badge--unb{background:var(--ds-warn-tint);color:var(--ds-warn);border:1px solid var(--ds-warn-line)}',
-	'.ai-badge--v6{background:rgba(124,58,237,.10);color:var(--ai-band-6);border:1px solid rgba(124,58,237,.32)}',
+	'.ai-badge--v6{background:var(--ds-band6-tint);color:var(--ai-band-6);border:1px solid var(--ds-band6-line)}',
 
 	'.ai-banner{display:flex;align-items:flex-start;gap:var(--ds-sp-2);margin:0 0 var(--ds-sp-2);padding:var(--ds-sp-2) var(--ds-sp-3);border:1px solid var(--ds-warn-line);border-left:3px solid var(--ds-warn);border-radius:var(--ds-r-md);background:var(--ds-warn-tint);color:var(--ds-warn);font-size:var(--ds-fs-sm)}',
 	'.ai-banner--error{border-color:var(--ds-error-line);border-left-color:var(--ds-error);background:var(--ds-error-tint);color:var(--ds-error)}',
@@ -526,19 +526,42 @@ function isDarkMode() {
 
 /* ── Stylesheet injection ──────────────────────────────────────────────────
  * One shared <style> node per document, holding the page token scope, its
- * dark-mode re-tune and the component rules. The re-tune is gated by the
- * runtime isDarkMode() probe (see above), not by a CSS attribute selector, so
- * it applies on Argon too. ensureCss() is idempotent - the getElementById hit
- * below returns the existing node untouched - so a theme switch after the page
- * has loaded is NOT picked up until the page is reloaded. */
+ * dark-mode re-tune and the component rules. cssText() rebuilds that body from
+ * scratch so the re-tune always reflects the current probe: tokens.dark has to
+ * be appended *after* the `.airoha-page` scope and can never be merged into it,
+ * because it carries the concrete dark surfaces/text the theme lookup cannot
+ * provide on Argon (see ds-tokens.js).
+ *
+ * The re-tune is gated by the runtime isDarkMode() probe (see above), not by a
+ * CSS attribute selector, so it applies on Argon too - and it is re-evaluated
+ * when the OS colour scheme flips: with Argon's default mode='normal' the dark
+ * palette is delivered inside `@media (prefers-color-scheme: dark)`, so a user
+ * who switches their system theme expects the page to follow without a reload.
+ *
+ * ensureCss() stays idempotent - the getElementById hit returns the existing
+ * node untouched - so the listener below is registered exactly once per
+ * document, however often the view re-renders. */
+function cssText() {
+	return '.airoha-page{' + tokens.tokens + ';line-height:1.5;color:var(--ds-text)}\n'
+		+ (isDarkMode() ? tokens.dark + '\n' : '') + COMPONENT_CSS;
+}
+
 function ensureCss() {
 	var el = document.getElementById(STYLE_ID);
 	if (el) return el;
 	el = document.createElement('style');
 	el.id = STYLE_ID;
-	el.textContent = '.airoha-page{' + tokens.tokens + ';line-height:1.5;color:var(--ds-text)}\n'
-		+ (isDarkMode() ? tokens.dark + '\n' : '') + COMPONENT_CSS;
+	el.textContent = cssText();
 	document.head.appendChild(el);
+	try {
+		var mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+		if (mq && mq.addEventListener) {
+			mq.addEventListener('change', function() {
+				var node = document.getElementById(STYLE_ID);
+				if (node) node.textContent = cssText();
+			});
+		}
+	} catch (e) {}
 	return el;
 }
 
