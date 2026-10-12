@@ -430,7 +430,7 @@ _airoha_cached_port_json() {
 _airoha_topology_cache_build() {
 	local cache="$1" tmp="${1}.$$"
 	local model compatible ports="" lan_raw="" lan_lines=""
-	local wan_netdev="" lan_count=0 wan_count=0 has_pon
+	local wan_netdev="" lan_count=0 wan_count=0 has_pon port_count=0
 	local n rel netdev x child nbq entry children
 
 	model=$(_airoha_topology_field "$(airoha_board_model)")
@@ -449,13 +449,22 @@ _airoha_topology_cache_build() {
 			nbq="${child##*@}"
 			case "$nbq" in ''|*[!0-9a-fA-F]*) continue ;; esac
 			entry=$(_airoha_port_struct "$child" gdm "$n" "$((0x$nbq))")
-			[ -n "$entry" ] && ports="${ports}${entry}
+			# Counted as they are appended rather than by re-scanning $ports:
+			# the count is a header record the validator checks, so it has to
+			# come from the same pass that produced the rows.
+			if [ -n "$entry" ]; then
+				ports="${ports}${entry}
 "
+				port_count=$((port_count + 1))
+			fi
 		done
 		[ "$children" = 0 ] || continue
 		entry=$(_airoha_port_struct "$rel" gdm "$n" null)
-		[ -n "$entry" ] && ports="${ports}${entry}
+		if [ -n "$entry" ]; then
+			ports="${ports}${entry}
 "
+			port_count=$((port_count + 1))
+		fi
 		netdev=$(_airoha_gdm_netdev "$rel")
 		if [ "$n" = 2 ]; then
 			[ -n "$netdev" ] && wan_netdev="$netdev"
@@ -470,8 +479,11 @@ _airoha_topology_cache_build() {
 		netdev=$(airoha_dt_read "$rel/label")
 		[ -n "$netdev" ] || continue
 		entry=$(_airoha_port_struct "$rel" gsw "$n" null)
-		[ -n "$entry" ] && ports="${ports}${entry}
+		if [ -n "$entry" ]; then
+			ports="${ports}${entry}
 "
+			port_count=$((port_count + 1))
+		fi
 		lan_raw="${lan_raw}${netdev}
 "
 	done
@@ -494,6 +506,16 @@ _airoha_topology_cache_build() {
 	[ -n "$wan_netdev" ] && wan_count=1
 	has_pon=$(airoha_pon_present)
 
+	# Publication time, so the reader can expire the file: structure is static,
+	# but not everything is present at the first poll - the xpon module and any
+	# late DSA port load after it, and without an expiry has_pon would stay
+	# pinned at whatever that first sample saw and null the PON block forever.
+	# Left empty when date is unavailable; the validator then trusts the file
+	# rather than rebuilding on every call.
+	local now
+	now=$(date +%s 2>/dev/null)
+	case "$now" in ''|*[!0-9]*) now="" ;; esac
+
 	rm -f "$tmp"
 	(umask 077; {
 		printf 'version|1\n'
@@ -503,6 +525,11 @@ _airoha_topology_cache_build() {
 		printf 'lan_count|%s\n' "$lan_count"
 		printf 'wan_count|%s\n' "$wan_count"
 		printf 'has_pon|%s\n' "$has_pon"
+		# Port rows are last in the file, so a tail truncation drops them and
+		# nothing else: without this record the validator cannot tell 9 ports
+		# from 8 and accepts a silently short topology.
+		printf 'port_count|%s\n' "$port_count"
+		printf 'ts|%s\n' "$now"
 		printf '%s' "$lan_lines"
 		printf '%s' "$ports"
 	} > "$tmp") 2>/dev/null || { rm -f "$tmp"; return 1; }
@@ -512,15 +539,27 @@ _airoha_topology_cache_build() {
 	}
 }
 
-# Reject partial or malformed cache files before using them. This also makes a
+# Reject partial or malformed cache files before using them, and expire them so
+# hardware that appears after the first poll is picked up. This makes a
 # power-loss/truncated file self-healing on the next dashboard request.
 _airoha_topology_cache_valid() {
 	local cache="$1" record f1 f2 f3 f4 f5 f6 f7 f8 extra
 	local version_seen=0 model_seen=0 compatible_seen=0 wan_seen=0
 	local lan_count_seen=0 wan_count_seen=0 pon_seen=0
-	local lan_count=0 cached_lan_count=""
+	local port_count_seen=0 ts_seen=0
+	local lan_count=0 port_count=0
+	local cached_lan_count="" cached_port_count="" cached_ts="" now age
+	local partial=0
 	[ -s "$cache" ] || return 1
-	while IFS='|' read -r record f1 f2 f3 f4 f5 f6 f7 f8 extra; do
+	# `|| { partial=1; [ -n "$record" ]; }` pulls a final line with no trailing
+	# newline into the body instead of letting read drop it - a complete cache
+	# always ends with one, every row being appended with it, so a rescued tail
+	# can only come from a write that was cut short. It is rejected outright
+	# rather than field-checked: a row cut inside its last field is still
+	# field-valid, and would otherwise pass every check below and publish a
+	# silently wrong value.
+	while IFS='|' read -r record f1 f2 f3 f4 f5 f6 f7 f8 extra || { partial=1; [ -n "$record" ]; }; do
+		[ "$partial" = 1 ] && return 1
 		case "$record" in
 			version)
 				[ "$version_seen" = 0 ] && [ "$f1" = 1 ] && [ -z "$f2" ] || return 1
@@ -554,6 +593,21 @@ _airoha_topology_cache_valid() {
 				case "$f1" in 0|1) ;; *) return 1 ;; esac
 				pon_seen=1
 				;;
+			port_count)
+				[ "$port_count_seen" = 0 ] && [ -z "$f2" ] || return 1
+				case "$f1" in ''|*[!0-9]*) return 1 ;; esac
+				cached_port_count="$f1"
+				port_count_seen=1
+				;;
+			ts)
+				[ "$ts_seen" = 0 ] && [ -z "$f2" ] || return 1
+				case "$f1" in
+					'') cached_ts="" ;;
+					*[!0-9]*) return 1 ;;
+					*) cached_ts="$f1" ;;
+				esac
+				ts_seen=1
+				;;
 			lan)
 				[ -n "$f1" ] && [ -z "$f2" ] || return 1
 				lan_count=$((lan_count + 1))
@@ -563,12 +617,23 @@ _airoha_topology_cache_valid() {
 				case "$f4" in ''|*[!0-9]*) return 1 ;; esac
 				case "$f5" in null) ;; ''|*[!0-9]*) return 1 ;; esac
 				case "$f6" in ''|*[!0-9]*) return 1 ;; esac
+				port_count=$((port_count + 1))
 				;;
 			*) return 1 ;;
 		esac
 	done < "$cache"
-	[ "$version_seen$model_seen$compatible_seen$wan_seen$lan_count_seen$wan_count_seen$pon_seen" = 1111111 ] || return 1
-	[ "$lan_count" -eq "$cached_lan_count" ] 2>/dev/null
+	[ "$version_seen$model_seen$compatible_seen$wan_seen$lan_count_seen$wan_count_seen$pon_seen$port_count_seen$ts_seen" = 111111111 ] || return 1
+	[ "$lan_count" -eq "$cached_lan_count" ] 2>/dev/null || return 1
+	[ "$port_count" -eq "$cached_port_count" ] 2>/dev/null || return 1
+	# Only a clock the cache itself was stamped with can expire it: an empty ts
+	# means date was missing at build time, and rebuilding every poll on such a
+	# box would be far worse than trusting a slightly old structure.
+	[ -n "$cached_ts" ] || return 0
+	now=$(date +%s 2>/dev/null)
+	case "$now" in ''|*[!0-9]*) return 0 ;; esac
+	[ "$now" -ge "$cached_ts" ] 2>/dev/null || return 0
+	age=$((now - cached_ts))
+	[ "$age" -le 60 ]
 }
 
 # Include split GDM/NBQ children as separate netdevs, never shared MIB samples.
