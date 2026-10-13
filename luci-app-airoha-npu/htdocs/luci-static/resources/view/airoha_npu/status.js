@@ -656,6 +656,24 @@ function renderEthernetPorts(topo) {
 	function count(value) {
 		return typeof value === 'number' && isFinite(value) ? value.toLocaleString() : 'N/A';
 	}
+	/* A PON netdev reports carrier=1 as soon as the interface exists, which
+	 * says nothing about whether the ONU ever reached the OLT - a stuck ONU
+	 * therefore still showed "Link up". For the PON port derive the state from
+	 * the registration data instead: no light (LOS), and any ONU state other
+	 * than O5, mean the link is not actually carrying service. "LOS" and the
+	 * O1-O7 codes are industry notation, so they need no translation and no
+	 * new catalogue entry - which matters because a hand-deployed build never
+	 * carries a rebuilt .lmo. */
+	function ponLink(p) {
+		var pon = topo.pon;
+		if (!pon || pon.present !== 1 || !p) return null;
+		if (p.role !== 'pon' && p.netdev !== pon.netdev) return null;
+		if (pon.los === 1) return { text: _('Link down') + ' (LOS)', ok: false };
+		var os = String(pon.onu_state || '').toUpperCase();
+		if (os === 'O5') return { text: _('Link up') + ' (O5)', ok: true };
+		if (/^O[1-7]$/.test(os)) return { text: _('Link down') + ' (' + os + ')', ok: false };
+		return { text: _('Unknown'), ok: false };
+	}
 	function bytes(value) {
 		return typeof value === 'number' && isFinite(value) ? '%1024.2mB'.format(value) : 'N/A';
 	}
@@ -668,6 +686,9 @@ function renderEthernetPorts(topo) {
 		rows: ports.map(function(p) {
 			var state = p.present === false ? _('Unavailable') :
 				p.carrier === 1 ? _('Link up') : p.carrier === 0 ? _('Link down') : _('Unknown');
+			var up = p.carrier === 1;
+			var plink = ponLink(p);
+			if (plink) { state = plink.text; up = plink.ok; }
 			// PON is asymmetric, so the backend reports its upstream rate
 			// alongside the downstream one; every other port leaves it null.
 			var speed = 'N/A';
@@ -679,7 +700,7 @@ function renderEthernetPorts(topo) {
 			if (p.nbq !== null && p.nbq !== undefined) path += ' / NBQ' + p.nbq;
 			return [
 				humanPortName(p, topo) + ' (' + p.netdev + ')',
-				path, aui.pill(state, p.carrier === 1 ? 'ok' : ''),
+				path, aui.pill(state, up ? 'ok' : ''),
 				speed + (p.carrier === 1 && p.duplex ? ' / ' + p.duplex : ''),
 				bytes(p.rx_bytes) + ' / ' + bytes(p.tx_bytes),
 				count(p.rx_packets) + ' / ' + count(p.tx_packets),
