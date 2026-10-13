@@ -101,7 +101,10 @@ function speedTag(mbps) {
 	mbps = Number(mbps) || 0;
 	if (mbps >= 10000) return '10G';
 	if (mbps >= 5000) return '5G';
-	if (mbps >= 2500) return '2.5G';
+	// 2488 is GPON downstream: at a flat 2500 floor it would read as "1G".
+	if (mbps >= 2400) return '2.5G';
+	// 2000 is NG-PON2 2G/2G and turbo-EPON - also would have read as "1G".
+	if (mbps >= 1900) return '2G';
 	if (mbps >= 1000) return '1G';
 	if (mbps >= 100) return '100M';
 	return '';
@@ -665,7 +668,13 @@ function renderEthernetPorts(topo) {
 		rows: ports.map(function(p) {
 			var state = p.present === false ? _('Unavailable') :
 				p.carrier === 1 ? _('Link up') : p.carrier === 0 ? _('Link down') : _('Unknown');
-			var speed = p.carrier === 1 && p.speed_mbps > 0 ? p.speed_mbps + ' Mbps' : 'N/A';
+			// PON is asymmetric, so the backend reports its upstream rate
+			// alongside the downstream one; every other port leaves it null.
+			var speed = 'N/A';
+			if (p.carrier === 1 && p.speed_mbps > 0 && p.speed_up_mbps > 0)
+				speed = speedTag(p.speed_mbps) + '\u2193 / ' + speedTag(p.speed_up_mbps) + '\u2191';
+			else if (p.carrier === 1 && p.speed_mbps > 0)
+				speed = p.speed_mbps + ' Mbps';
 			var path = (p.kind === 'gsw' ? 'GSW' : 'GDM') + p.reg;
 			if (p.nbq !== null && p.nbq !== undefined) path += ' / NBQ' + p.nbq;
 			return [

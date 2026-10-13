@@ -406,7 +406,7 @@ _airoha_port_struct() {
 _airoha_cached_port_json() {
 	local netdev="$1" key="$2" kind="$3" reg="$4"
 	local nbq="$5" pse="$6" role="$7" mode="$8"
-	local base field present=false duplex="" carrier speed
+	local base field present=false duplex="" carrier speed rates down up=null
 	base="/sys/class/net/$netdev"
 	[ -n "$netdev" ] && [ -d "$base" ] && present=true
 	# Same read-not-cat rule as _airoha_net_number(): emptied first so a failed
@@ -416,15 +416,29 @@ _airoha_cached_port_json() {
 	speed=$(_airoha_net_number "$base/speed")
 	# The xpon driver publishes speed/duplex sysfs attributes that are always
 	# empty, so a PON port that is up and carrying traffic still rendered
-	# "N/A". Fall back to 10G. Three deliberate limits:
+	# "N/A". Fall back to the line rate derived from the PON mode
+	# (airoha_pon_rates(): XGPON 10G/2.5G, XGSPON 10G/10G, 10G-EPON 10G/1G or
+	# 10G/10G, GPON 2.5G/1.25G, ...), and to a flat 10G only when the mode
+	# itself could not be read ("0 0"). Two deliberate limits:
 	#   - only while carrier is up, so a dark fibre still reads as unknown;
 	#   - only when the attribute is genuinely unreadable, so a future driver
-	#     that does report the negotiated rate keeps winning;
-	#   - a constant, not the mode-derived airoha_pon_rates(), because that
-	#     varies per PON mode while this placeholder is meant to be stable.
+	#     that does report the negotiated rate keeps winning.
+	# Reached at most once per poll, and only on boards with a PON port.
 	# Duplex stays empty on purpose: PON has no duplex attribute to report.
 	if [ "$role" = pon ] && [ "$carrier" = 1 ] && [ "$speed" = null ]; then
-		speed=10000
+		rates=$(airoha_pon_rates)
+		down="${rates%% *}"
+		up="${rates##* }"
+		case "$down" in ''|*[!0-9]*) down=0 ;; esac
+		case "$up" in ''|*[!0-9]*) up=null ;; esac
+		if [ "$down" -gt 0 ] 2>/dev/null; then
+			speed="$down"
+		else
+			# Mode unreadable: there is no up rate to stand behind either, so
+			# the placeholder must not claim a 2.5G upstream.
+			speed=10000
+			up=null
+		fi
 	fi
 	printf '{"key":"%s","kind":"%s","reg":%s,"port":%s,"nbq":%s,"pse":%s,"netdev":"%s","role":"%s","mode":"%s","present":%s' \
 		"$(_airoha_json_str "$key")" "$(_airoha_json_str "$kind")" "$reg" "$reg" "$nbq" "$pse" \
@@ -434,6 +448,10 @@ _airoha_cached_port_json() {
 	for field in rx_bytes tx_bytes rx_packets tx_packets rx_errors tx_errors rx_dropped tx_dropped; do
 		printf ',"%s":%s' "$field" "$(_airoha_net_number "$base/statistics/$field")"
 	done
+	# PON is the only asymmetric link on these boards, so the port row carries
+	# its upstream rate too; every other port leaves it null. Appended last so
+	# the established key order in front of it is untouched.
+	printf ',"speed_up_mbps":%s' "$up"
 	printf '}'
 }
 
