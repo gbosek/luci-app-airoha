@@ -406,19 +406,31 @@ _airoha_port_struct() {
 _airoha_cached_port_json() {
 	local netdev="$1" key="$2" kind="$3" reg="$4"
 	local nbq="$5" pse="$6" role="$7" mode="$8"
-	local base field present=false duplex=""
+	local base field present=false duplex="" carrier speed
 	base="/sys/class/net/$netdev"
 	[ -n "$netdev" ] && [ -d "$base" ] && present=true
 	# Same read-not-cat rule as _airoha_net_number(): emptied first so a failed
 	# redirect reports "", and -f guarded so the redirect never fails loudly.
 	[ -f "$base/duplex" ] && read -r duplex < "$base/duplex"
+	carrier=$(_airoha_net_number "$base/carrier")
+	speed=$(_airoha_net_number "$base/speed")
+	# The xpon driver publishes speed/duplex sysfs attributes that are always
+	# empty, so a PON port that is up and carrying traffic still rendered
+	# "N/A". Fall back to 10G. Three deliberate limits:
+	#   - only while carrier is up, so a dark fibre still reads as unknown;
+	#   - only when the attribute is genuinely unreadable, so a future driver
+	#     that does report the negotiated rate keeps winning;
+	#   - a constant, not the mode-derived airoha_pon_rates(), because that
+	#     varies per PON mode while this placeholder is meant to be stable.
+	# Duplex stays empty on purpose: PON has no duplex attribute to report.
+	if [ "$role" = pon ] && [ "$carrier" = 1 ] && [ "$speed" = null ]; then
+		speed=10000
+	fi
 	printf '{"key":"%s","kind":"%s","reg":%s,"port":%s,"nbq":%s,"pse":%s,"netdev":"%s","role":"%s","mode":"%s","present":%s' \
 		"$(_airoha_json_str "$key")" "$(_airoha_json_str "$kind")" "$reg" "$reg" "$nbq" "$pse" \
 		"$(_airoha_json_str "$netdev")" "$(_airoha_json_str "$role")" "$(_airoha_json_str "$mode")" "$present"
 	printf ',"carrier":%s,"speed_mbps":%s,"duplex":"%s"' \
-		"$(_airoha_net_number "$base/carrier")" \
-		"$(_airoha_net_number "$base/speed")" \
-		"$(_airoha_json_str "$duplex")"
+		"$carrier" "$speed" "$(_airoha_json_str "$duplex")"
 	for field in rx_bytes tx_bytes rx_packets tx_packets rx_errors tx_errors rx_dropped tx_dropped; do
 		printf ',"%s":%s' "$field" "$(_airoha_net_number "$base/statistics/$field")"
 	done
