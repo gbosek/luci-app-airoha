@@ -6,6 +6,7 @@
 'require view.airoha.ui as aui';
 
 /* ── RPC declarations ── */
+var callFrameEngine = rpc.declare({ object: 'luci.airoha_npu', method: 'getFrameEngine' });
 var callNpuStatus = rpc.declare({ object: 'luci.airoha_npu', method: 'getStatus' });
 var callPpeEntries = rpc.declare({ object: 'luci.airoha_npu', method: 'getPpeEntries' });
 var callTokenInfo = rpc.declare({ object: 'luci.airoha_npu', method: 'getTokenInfo' });
@@ -831,6 +832,40 @@ function updatePpeTable(entries, metadata) {
 	if (next) next.disabled = ppePage + 1 >= pages;
 }
 
+
+/* FE hardware counters are 32-bit cumulative values, not WAN-specific. */
+var previousCdmSample = null;
+function renderCdmCounters(fe) {
+	if (!fe || fe.available !== true || !Array.isArray(fe.cdm))
+		return aui.section({ title: _('CDM Hardware Counters'), body: E('p', {}, _('Hardware register counters unavailable (requires devmem and compatible FE mapping).')) });
+	var now = Date.now();
+	var rows = fe.cdm.map(function(c) {
+		var prev = previousCdmSample && previousCdmSample.cdm[c.name];
+		var elapsed = previousCdmSample ? (now - previousCdmSample.time) / 1000 : 0;
+		function delta(key) {
+			if (!prev || elapsed <= 0 || elapsed > 30) return null;
+			var a = Number(c[key]), b = Number(prev[key]);
+			if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+			return (a - b + 4294967296) % 4294967296;
+		}
+		var cpu = delta('rx_cpu_ok'), hw = delta('rx_hwf_ok');
+		var pct = cpu !== null && hw !== null && cpu + hw > 0 ? (100 * hw / (cpu + hw)).toFixed(1) + '%' : 'N/A';
+		return [c.name + ' (' + (fe.pse_ports[c.name] || '?') + ')',
+			String(c.tx_ok), String(c.rx_cpu_ok), String(c.rx_hwf_ok),
+			String(c.rx_cpu_drop), String(c.rx_hwf_drop),
+			pct, hw === null ? 'N/A' : (hw / elapsed).toFixed(1)];
+	});
+	previousCdmSample = { time: now, cdm: Object.fromEntries(fe.cdm.map(function(c) { return [c.name, c]; })) };
+	return aui.section({
+		title: _('CDM Hardware Counters'),
+		hint: _('Read-only FE register counters. HW share uses 5-second RX deltas; not proof of per-WAN offload. 32-bit counter wraps may affect rates.'),
+		body: aui.table({ mono: true, stack: true, cols: [
+			{t: _('Engine')}, {t: 'TX OK'}, {t: 'RX CPU'}, {t: 'RX HWF'},
+			{t: 'CPU DROP'}, {t: 'HWF DROP'}, {t: _('HW RX share')}, {t: _('HWF pkt/s')}
+		], rows: rows })
+	});
+}
+
 /* ── Main view ── */
 return view.extend({
 	load: function() {
@@ -918,7 +953,8 @@ return view.extend({
 					renderSummary(st, ti),
 					E('div', { 'id': 'offload-controls', 'style': 'margin-top:var(--ds-sp-3)' },
 						renderOffloadControls(topo, vo, flo, apo, bridgeBlocked)),
-					E('div', { 'id': 'engine-status' }, renderEngineStatus(st, ppe))
+					E('div', { 'id': 'engine-status' }, renderEngineStatus(st, ppe)),
+					E('div', { 'id': 'cdm-counters' })
 				])
 			}),
 
@@ -951,7 +987,8 @@ return view.extend({
 				// VLAN Offload rejoined as an independent switch; appended at the
 				// END so every existing d[n] index below keeps its meaning.
 				_safeCall(callGetVlanOffload(), { enabled: 0 }),
-				_safeCall(callGetWifiStats(), { available: false, bands: [] })
+				_safeCall(callGetWifiStats(), { available: false, bands: [] }),
+				_safeCall(callFrameEngine(), { available: false })
 			]).then(L.bind(function(d) {
 				aui.ensureCss();
 				var st = d[0] || {}, ppe = d[1] || {}, ti = d[2] || {};
@@ -961,6 +998,7 @@ return view.extend({
 				var topo = d[6] || {};
 				var vo = d[7] || { enabled: 0 };
 				var wifi = d[8] || { available: false, bands: [] };
+				var fe = d[9] || { available: false };
 				if (typeof wifi.has_wifi !== 'boolean' && typeof ti.has_wifi === 'boolean')
 					wifi.has_wifi = ti.has_wifi;
 				var bridgeBlocked = isBridgeOffloadBlocked(dm);
@@ -1020,6 +1058,8 @@ return view.extend({
 					controls.setAttribute('data-board', controlBoard);
 				}
 
+				var cdmEl = document.getElementById('cdm-counters');
+				if (cdmEl) cdmEl.replaceChildren(renderCdmCounters(fe));
 				var engineEl = document.getElementById('engine-status');
 				if (engineEl) engineEl.replaceChildren(renderEngineStatus(st, ppe));
 				var epEl = document.getElementById('ethernet-ports');

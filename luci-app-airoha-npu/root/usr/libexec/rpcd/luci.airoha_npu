@@ -671,12 +671,41 @@ set_apmode_offload() {
 	printf '{"result":"ok","enabled":%d}' "$enabled"
 }
 
+
+# Read-only AN758x FE CDM counters. Values are cumulative 32-bit registers.
+# A missing devmem or unsupported memory mapping must not look like zero traffic.
+_cdm_reg() {
+	local value
+	value=$(devmem "$1" 32 2>/dev/null) || return 1
+	case "$value" in 0x[0-9a-fA-F]*|[0-9]*) ;; *) return 1 ;; esac
+	printf '%u' "$((value))"
+}
+_cdm_json() {
+	local name="$1" base="$2" tx cpu hw cpu_drop hw_drop
+	tx=$(_cdm_reg "$((base + 0x580))") || return 1
+	cpu=$(_cdm_reg "$((base + 0x590))") || return 1
+	hw=$(_cdm_reg "$((base + 0x594))") || return 1
+	cpu_drop=$(_cdm_reg "$((base + 0x5a0))") || return 1
+	hw_drop=$(_cdm_reg "$((base + 0x5a4))") || return 1
+	printf '{"name":"%s","tx_ok":%s,"rx_cpu_ok":%s,"rx_hwf_ok":%s,"rx_cpu_drop":%s,"rx_hwf_drop":%s}' "$name" "$tx" "$cpu" "$hw" "$cpu_drop" "$hw_drop"
+}
+get_frame_engine() {
+	local cdm1 cdm2
+	command -v devmem >/dev/null 2>&1 || { echo '{"available":false,"reason":"devmem unavailable","cdm":[]}'; return; }
+	cdm1=$(_cdm_json CDM1 0x1fb50000) || { echo '{"available":false,"reason":"CDM1 register read failed","cdm":[]}'; return; }
+	cdm2=$(_cdm_json CDM2 0x1fb51000) || { echo '{"available":false,"reason":"CDM2 register read failed","cdm":[]}'; return; }
+	printf '{"available":true,"counter_bits":32,"pse_ports":{"CDM1":"P0","CDM2":"P5","PPE1":"P4","PPE2":"P8"},"cdm":[%s,%s]}\n' "$cdm1" "$cdm2"
+}
+
 case "$1" in
 	list)
-		echo '{"getStatus":{},"getTopology":{},"getPpeEntries":{},"getTokenInfo":{},"getWifiStats":{},"getVlanOffload":{},"setVlanOffload":{"enabled":"int"},"getPppoeOffload":{},"setPppoeOffload":{"enabled":"int"},"getFlowOffload":{},"setFlowOffload":{"enabled":"int"},"getApModeOffload":{},"setApModeOffload":{"enabled":"int"},"getDeviceMode":{},"setGovernor":{"governor":"str"},"setMaxFreq":{"freq":"int"},"setCpuSettings":{"governor":"str","freq":"int"}}'
+		echo '{"getFrameEngine":{},"getStatus":{},"getTopology":{},"getPpeEntries":{},"getTokenInfo":{},"getWifiStats":{},"getVlanOffload":{},"setVlanOffload":{"enabled":"int"},"getPppoeOffload":{},"setPppoeOffload":{"enabled":"int"},"getFlowOffload":{},"setFlowOffload":{"enabled":"int"},"getApModeOffload":{},"setApModeOffload":{"enabled":"int"},"getDeviceMode":{},"setGovernor":{"governor":"str"},"setMaxFreq":{"freq":"int"},"setCpuSettings":{"governor":"str","freq":"int"}}'
 		;;
 	call)
 		case "$2" in
+			getFrameEngine)
+				get_frame_engine
+				;;
 			getStatus)
 				get_status
 				;;
