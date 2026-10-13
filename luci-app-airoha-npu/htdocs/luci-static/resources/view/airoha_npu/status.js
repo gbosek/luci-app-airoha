@@ -677,7 +677,12 @@ function renderEthernetPorts(topo) {
 	function bytes(value) {
 		return typeof value === 'number' && isFinite(value) ? '%1024.2mB'.format(value) : 'N/A';
 	}
+	/* Same 3px accent stripe the cards, tiles and switch rows carry, so the
+	 * port table reads as one of the page's single elements instead of a bare
+	 * grid. Ports are NPU-side hardware (GDM/GSW, the frame engine's own
+	 * counters), so they take --ai-npu rather than the CPU/load accents. */
 	var table = aui.table({
+		accent: 'var(--ai-npu)',
 		cols: [
 			{ t: _('Port') }, { t: _('Path') }, { t: _('Link') }, { t: _('Speed / Duplex') },
 			{ t: _('RX / TX bytes'), num: true }, { t: _('RX / TX packets'), num: true },
@@ -1032,7 +1037,12 @@ function renderPpeTable(entries) {
 				ppePage++; updatePpeTable(ppeCurrentEntries);
 			} }, '\u203a')
 	]);
-	return E('div', {}, [tools, E('div', { 'class': 'ai-table-wrap' }, [
+	// Accent stripe like every other single element on the page; PPE is the
+	// NPU's own flow table, so it takes the same --ai-npu as the port table.
+	return E('div', {}, [tools, E('div', {
+		'class': 'ai-table-wrap ai-table-wrap--accent',
+		'style': '--ai-accent:var(--ai-npu)'
+	}, [
 		E('table', { 'class': 'ai-table ai-table--mono ai-table--stack', 'id': 'ppe-entries-table' }, [
 			E('thead', {}, [
 				E('tr', {}, [

@@ -153,6 +153,9 @@ var COMPONENT_CSS = [
 	'.ai-field select{flex:1;min-width:0}',
 
 	'.ai-table-wrap{overflow:auto;border:1px solid var(--ds-border);border-radius:var(--ds-r-md);max-height:24em}',
+	// Same accent rule the cards, tiles and switch rows use, so a table reads
+	// as one of the page's single elements instead of a bare grid.
+	'.ai-table-wrap--accent{border-left:3px solid var(--ai-accent,var(--ds-border))}',
 	'.ai-table{width:100%;border-collapse:collapse;font-size:var(--ds-fs-sm)}',
 	'.ai-table th{position:sticky;top:0;z-index:1;background:var(--ds-surface-sunken);color:var(--ds-text-muted);font-weight:650;text-align:left;white-space:nowrap;padding:var(--ds-sp-2) var(--ds-sp-2);border-bottom:1px solid var(--ds-border)}',
 	'.ai-table td{padding:var(--ds-sp-1) var(--ds-sp-2);border-bottom:1px solid var(--ds-border);vertical-align:top;overflow-wrap:anywhere;word-break:break-word}',
@@ -382,7 +385,11 @@ function table(o) {
 	} else {
 		bodyRows = [ E('tr', {}, [ E('td', { 'colspan': String(cols.length) }, empty(o.emptyText || '')) ]) ];
 	}
-	return E('div', { 'class': 'ai-table-wrap' }, [
+	var wrapAttrs = {
+		'class': 'ai-table-wrap' + (o.accent ? ' ai-table-wrap--accent' : '')
+	};
+	if (o.accent) wrapAttrs.style = '--ai-accent:' + o.accent;
+	return E('div', wrapAttrs, [
 		E('table', { 'class': 'ai-table' + (o.mono ? ' ai-table--mono' : '') + (o.stack ? ' ai-table--stack' : '') }, [
 			E('thead', {}, headRow),
 			E('tbody', {}, bodyRows)
