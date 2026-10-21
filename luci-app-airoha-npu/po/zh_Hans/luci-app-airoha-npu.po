@@ -795,3 +795,6 @@ msgstr "未连接"
 
 msgid "Total received"
 msgstr "总接收"
+
+msgid "CPU Usage History"
+msgstr "CPU 占用率历史"

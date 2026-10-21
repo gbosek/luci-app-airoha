@@ -79,6 +79,14 @@ var COMPONENT_CSS = [
 	'.ai-num{font-family:var(--ds-mono);font-variant-numeric:tabular-nums;text-align:right}',
 	'.ai-err{color:var(--ds-error);font-weight:650}',
 
+	/* Series legend for multi-line charts: the colour key and the live value in
+	 * one row, so a chart that draws several series needs no second table. */
+	'.ai-legend{display:flex;flex-wrap:wrap;align-items:center;gap:var(--ds-sp-1) var(--ds-sp-3);margin:0 0 var(--ds-sp-2)}',
+	'.ai-legend-item{display:inline-flex;align-items:center;gap:var(--ds-sp-1);font-size:var(--ds-fs-xs);white-space:nowrap}',
+	'.ai-legend-swatch{width:1.2em;height:2px;border-radius:var(--ds-r-sm);flex:0 0 auto}',
+	'.ai-legend-label{font-family:var(--ds-mono);color:var(--ds-text-muted)}',
+	'.ai-legend-value{font-family:var(--ds-mono);font-variant-numeric:tabular-nums;font-weight:650}',
+
 	'.ai-kv{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--ds-border);border:1px solid var(--ds-border);border-radius:var(--ds-r-md);overflow:hidden}',
 	'.ai-kv-item{display:flex;align-items:baseline;justify-content:space-between;gap:var(--ds-sp-2);padding:var(--ds-sp-2) var(--ds-sp-3);background:var(--ds-surface-sunken);font-size:var(--ds-fs-sm);min-width:0}',
 	'.ai-kv-k{color:var(--ds-text-muted);white-space:nowrap}',
@@ -358,6 +366,24 @@ function empty(text, isError) {
 	return E('div', { 'class': 'ai-empty' + (isError ? ' ai-error-state' : '') }, text);
 }
 
+/* Colour-keyed legend for a multi-series chart. `items` is an array of
+ * { label, value, color, dashed }: `color` is any CSS colour (in practice a
+ * var(--ai-*) token) and paints both the swatch and the value; `dashed` only
+ * dims the swatch, mirroring how the reader draws a repeated-palette series. */
+function legend(items) {
+	return E('div', { 'class': 'ai-legend' }, (items || []).map(function(item) {
+		var color = item.color || 'var(--ds-text-muted)';
+		return E('div', { 'class': 'ai-legend-item' }, [
+			E('span', {
+				'class': 'ai-legend-swatch',
+				'style': 'background:' + color + (item.dashed ? ';opacity:.55' : '')
+			}),
+			E('span', { 'class': 'ai-legend-label' }, item.label),
+			E('span', { 'class': 'ai-legend-value', 'style': 'color:' + color }, item.value)
+		]);
+	}));
+}
+
 function details(title, body) {
 	return E('details', { 'class': 'ai-details' }, [
 		E('summary', {}, title),
@@ -603,6 +629,7 @@ return baseclass.extend({
 	card: card,
 	row: row,
 	empty: empty,
+	legend: legend,
 	details: details,
 	table: table,
 	switchRow: switchRow,

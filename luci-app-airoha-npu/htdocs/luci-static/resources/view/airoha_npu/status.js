@@ -409,6 +409,285 @@ function renderFreqChart(min, max, containerW) {
 	]);
 }
 
+/* ── CPU usage history chart ──
+ * The frequency curve answers "how fast are the cores running", which only
+ * becomes readable next to "how busy were they"; this card is that second half.
+ * The backend publishes the kernel's cumulative per-CPU jiffies (/proc/stat)
+ * and nothing else, because a utilisation percentage needs two samples: the
+ * reader keeps the previous snapshot and differentiates it on every 5 s poll.
+ * Keeping the arithmetic here leaves the RPC stateless, so two open tabs - or a
+ * reloaded one - each measure their own interval instead of overwriting a
+ * shared /tmp baseline.
+ *
+ * A sample is one array entry per core (index = core number, so the chart can
+ * draw one coloured line per thread). A null entry marks a core that was not
+ * measurable in that interval (hotplug, or a counter that went backwards): the
+ * line breaks there rather than being drawn through a fake 0.
+ */
+var LOAD_HISTORY_KEY = 'airoha_npu.cpu_load_history';
+var LOAD_BASELINE_KEY = 'airoha_npu.cpu_load_baseline';
+
+function isPercent(v) {
+	return typeof v === 'number' && isFinite(v) && v >= 0 && v <= 100;
+}
+
+function restoreLoadHistory() {
+	var now = Date.now();
+	try {
+		var raw = sessionStorage.getItem(LOAD_HISTORY_KEY);
+		if (!raw) return [];
+		var samples = JSON.parse(raw);
+		if (!Array.isArray(samples)) return [];
+		return samples.filter(function(sample) {
+			return sample && typeof sample === 'object' &&
+				typeof sample.t === 'number' && isFinite(sample.t) && sample.t > 0 &&
+				Array.isArray(sample.u) && sample.u.length > 0 &&
+				sample.u.every(function(v) { return v === null || isPercent(v); }) &&
+				sample.t >= now - FREQ_HISTORY_MAX_AGE_MS;
+		}).slice(-FREQ_HISTORY_MAX);
+	} catch (err) {
+		// Storage can be disabled (including privacy modes) or hold stale data.
+		return [];
+	}
+}
+
+function saveLoadHistory() {
+	try {
+		sessionStorage.setItem(LOAD_HISTORY_KEY, JSON.stringify(loadHistory));
+	} catch (err) {
+		// A denied or full storage area must never stop the five-second poll.
+	}
+}
+
+/* The previous /proc/stat snapshot, as [total, idle] pairs (compact on purpose:
+ * it is rewritten on every poll). Restored across a reload so the curve
+ * continues instead of waiting one interval for its first point. */
+function restoreLoadBaseline() {
+	var now = Date.now();
+	try {
+		var raw = sessionStorage.getItem(LOAD_BASELINE_KEY);
+		if (!raw) return null;
+		var base = JSON.parse(raw);
+		if (!base || typeof base !== 'object' ||
+			typeof base.t !== 'number' || !(base.t > 0) ||
+			base.t < now - FREQ_HISTORY_MAX_AGE_MS) return null;
+		var ticks = base.ticks;
+		if (!Array.isArray(ticks) || !ticks.length) return null;
+		var ok = ticks.every(function(p) {
+			return Array.isArray(p) && p.length === 2 &&
+				typeof p[0] === 'number' && isFinite(p[0]) && p[0] > 0 &&
+				typeof p[1] === 'number' && isFinite(p[1]) && p[1] >= 0 && p[1] <= p[0];
+		});
+		return ok ? { t: base.t, ticks: ticks } : null;
+	} catch (err) {
+		return null;
+	}
+}
+
+function saveLoadBaseline() {
+	try {
+		sessionStorage.setItem(LOAD_BASELINE_KEY, JSON.stringify(loadBaseline));
+	} catch (err) {
+		// Same as above: persistence is best-effort, never fatal.
+	}
+}
+
+var loadHistory = restoreLoadHistory();
+var loadBaseline = restoreLoadBaseline();
+
+/* Normalise the backend's [{"total":N,"idle":M}, ...] into [N, M] pairs.
+ * Anything that is not a plausible monotonic counter reading rejects the whole
+ * snapshot: a half-parsed core would silently skew that core's curve. */
+function tickPairs(ticks) {
+	if (!Array.isArray(ticks) || !ticks.length) return null;
+	var pairs = [];
+	for (var i = 0; i < ticks.length; i++) {
+		var tick = ticks[i] || {};
+		var total = Number(tick.total), idle = Number(tick.idle);
+		if (!isFinite(total) || !isFinite(idle) || total <= 0 || idle < 0 || idle > total)
+			return null;
+		pairs.push([total, idle]);
+	}
+	return pairs;
+}
+
+/* Fold one /proc/stat snapshot into the history. Returns true when it produced
+ * a usage point (the first snapshot can only become the baseline). A counter
+ * that went backwards means the board rebooted: the old curve described a
+ * different uptime, so it is discarded instead of being continued. */
+function pushLoadSample(ticks) {
+	var current = tickPairs(ticks);
+	if (!current) return false;
+
+	var now = Date.now();
+	var base = loadBaseline;
+	var sample = null, reboot = false;
+
+	if (base && base.ticks.length) {
+		var usage = [], measured = false;
+		for (var i = 0; i < current.length; i++) {
+			var prev = base.ticks[i];
+			var dTotal = prev ? current[i][0] - prev[0] : 0;
+			var dIdle = prev ? current[i][1] - prev[1] : 0;
+			if (dTotal < 0) { reboot = true; break; }
+			if (dTotal > 0 && dIdle >= 0 && dIdle <= dTotal) {
+				usage.push(Math.round((1 - dIdle / dTotal) * 1000) / 10);
+				measured = true;
+			} else {
+				usage.push(null);
+			}
+		}
+		if (reboot) {
+			loadHistory = [];
+			saveLoadHistory();
+		} else if (measured) {
+			sample = { t: now, u: usage };
+		}
+	}
+
+	loadBaseline = { t: now, ticks: current };
+	saveLoadBaseline();
+
+	if (!sample) return false;
+	loadHistory.push(sample);
+	if (loadHistory.length > FREQ_HISTORY_MAX) loadHistory.shift();
+	saveLoadHistory();
+	return true;
+}
+
+/* A fresh tab has no previous snapshot, so the first usage point would only
+ * appear on the second poll. One extra getStatus ~1.2 s after the first reply
+ * gives the curve a real (short-window) first point immediately. Armed at most
+ * once per page load, and it is the cheap RPC - not another getDashboard. */
+var loadSeedTimer = null;
+function armLoadSeed() {
+	if (loadSeedTimer !== null) return;
+	loadSeedTimer = setTimeout(function() {
+		loadSeedTimer = null;
+		callNpuStatus().then(function(st) {
+			if (!st || !pushLoadSample(st.cpu_ticks)) return;
+			renderLoadHistoryCard();
+		}).catch(function() {});
+	}, 1200);
+}
+
+/* Palette + dash policy for the per-core series (see ds-tokens.js). */
+var CORE_COLORS = [ 'var(--ai-core-0)', 'var(--ai-core-1)', 'var(--ai-core-2)', 'var(--ai-core-3)' ];
+function coreColor(i) { return CORE_COLORS[i % CORE_COLORS.length]; }
+function coreDashed(i) { return i >= CORE_COLORS.length; }
+
+function loadCoreCount() {
+	var cores = 0;
+	for (var i = 0; i < loadHistory.length; i++)
+		cores = Math.max(cores, loadHistory[i].u.length);
+	return cores;
+}
+
+function renderLoadLegend() {
+	var n = loadHistory.length;
+	var latest = n ? loadHistory[n - 1].u : [];
+	var items = [];
+	for (var c = 0; c < loadCoreCount(); c++) {
+		var v = latest[c];
+		/* Core labels stay untranslated technical tokens, like GDM1 or the
+		 * netdev names elsewhere on this page. */
+		items.push({
+			label: 'cpu' + c,
+			value: isPercent(v) ? aui.fmtPct(v) : '—',
+			color: coreColor(c),
+			dashed: coreDashed(c)
+		});
+	}
+	return aui.legend(items);
+}
+
+/* Multi-line usage chart: fixed 0-100 % scale, one line per core. No area fill
+ * (several stacked washes would muddy the colours) and no right-hand axis -
+ * 100 % is the only ceiling that matters here. */
+function renderLoadChart(containerW) {
+	var n = loadHistory.length;
+	var cores = loadCoreCount();
+	if (!n || !cores) return aui.empty(_('No data'));
+
+	var W = Math.round(containerW > 0 ? containerW : 600);
+	var H = 240, padX = 6, padT = 14, padB = 6;
+	var innerW = W - padX * 2, innerH = H - padT - padB;
+	function xOf(i) { return padX + (FREQ_HISTORY_MAX - n + i) / (FREQ_HISTORY_MAX - 1) * innerW; }
+	function yOf(pct) { return padT + innerH - aui.clampPct(pct) / 100 * innerH; }
+
+	var gridStyle = 'stroke:var(--ds-border);stroke-width:1;stroke-dasharray:3 3';
+	var lblStyle = 'fill:var(--ds-text-muted);font-size:9px;font-family:var(--ds-mono)';
+	var nodes = [];
+
+	[0, 25, 50, 75, 100].forEach(function(pct) {
+		nodes.push(svgEl('line', {
+			'x1': padX, 'y1': yOf(pct).toFixed(1),
+			'x2': W - padX, 'y2': yOf(pct).toFixed(1),
+			'style': gridStyle
+		}));
+	});
+	/* Three anchor labels only: one per gridline would crowd a card that shares
+	 * the row with the frequency chart. Each sits just above its own line. */
+	[100, 50, 0].forEach(function(pct) {
+		nodes.push(svgEl('text', { 'x': padX + 2, 'y': (yOf(pct) - 4).toFixed(1), 'style': lblStyle },
+			[ document.createTextNode(pct + '%') ]));
+	});
+
+	for (var c = 0; c < cores; c++) {
+		var segs = [], seg = [];
+		for (var i = 0; i < n; i++) {
+			var v = loadHistory[i].u[c];
+			if (!isPercent(v)) {
+				if (seg.length) { segs.push(seg); seg = []; }
+				continue;
+			}
+			seg.push(xOf(i).toFixed(1) + ',' + yOf(v).toFixed(1));
+		}
+		if (seg.length) segs.push(seg);
+
+		var lineStyle = 'fill:none;stroke:' + coreColor(c) +
+			';stroke-width:2;stroke-linejoin:round;stroke-linecap:round' +
+			(coreDashed(c) ? ';stroke-dasharray:5 3' : '');
+		for (var s = 0; s < segs.length; s++) {
+			/* A one-point segment has no length to stroke - draw the dot, which
+			 * is also the whole curve during the first seconds of a run. */
+			if (segs[s].length === 1) {
+				var xy = segs[s][0].split(',');
+				nodes.push(svgEl('circle', { 'cx': xy[0], 'cy': xy[1], 'r': '2.5', 'style': 'fill:' + coreColor(c) }));
+			} else {
+				nodes.push(svgEl('polyline', { 'points': segs[s].join(' '), 'style': lineStyle }));
+			}
+		}
+
+		var headPct = loadHistory[n - 1].u[c];
+		if (isPercent(headPct))
+			nodes.push(svgEl('circle', {
+				'cx': xOf(n - 1).toFixed(1), 'cy': yOf(headPct).toFixed(1),
+				'r': '3', 'style': 'fill:' + coreColor(c)
+			}));
+	}
+
+	return svgEl('svg', {
+		'viewBox': '0 0 ' + W + ' ' + H,
+		'width': '100%', 'height': H,
+		'style': 'display:block',
+		'role': 'img', 'aria-label': _('CPU Usage History')
+	}, nodes);
+}
+
+function renderLoadCard() {
+	var host = document.getElementById('cpu-load-history-content');
+	var w = (host && host.clientWidth) || 0;
+	return E('div', {}, [ renderLoadLegend(), renderLoadChart(w) ]);
+}
+
+function renderLoadHistoryCard() {
+	var host = document.getElementById('cpu-load-history-content');
+	if (!host) return;
+	host.innerHTML = '';
+	host.appendChild(renderLoadCard());
+}
+
 /* ── CPU control settings (governor / max freq + save) ── */
 function governorLabel(governor) {
 	var labels = {
@@ -1147,10 +1426,17 @@ return view.extend({
 							E('div', { 'id': 'cpu-info-content' }, [ renderCpuInfo(st) ]),
 							E('div', { 'id': 'cpu-freq-card' }, [ renderFreqCard(st) ])
 						]),
-						E('div', { 'class': 'ai-grid', 'style': 'margin-top:var(--ds-sp-2)' }, [
+						E('div', { 'class': 'ai-grid ai-grid--2', 'style': 'margin-top:var(--ds-sp-2)' }, [
 							aui.card({
 								name: _('Frequency History'), accent: 'var(--ai-npu)',
 								body: E('div', { 'id': 'cpu-history-content' }, [ renderFreqChart(st.cpu_min_freq, st.cpu_max_freq) ])
+							}),
+							// The usage curve is what makes the frequency steps above
+							// readable, so the two charts share a row and the same
+							// sample spacing (one point per 5 s poll).
+							aui.card({
+								name: _('CPU Usage History'), accent: 'var(--ai-cpu)',
+								body: E('div', { 'id': 'cpu-load-history-content' }, [ renderLoadCard() ])
 							})
 						])
 					])
@@ -1216,10 +1502,17 @@ return view.extend({
 			var ci = document.getElementById('cpu-info-content');
 			if (ci) { ci.innerHTML = ''; ci.appendChild(renderCpuInfo(st)); }
 
-			// History chart — append one sample per poll and re-render.
+			// History charts — one sample per poll each. The frequency curve has
+			// its point immediately; the usage curve needs two /proc/stat
+			// snapshots, so the first poll only records the baseline.
 			pushFreqSample(freqState(st).freq);
 			var hc = document.getElementById('cpu-history-content');
 			if (hc) { hc.innerHTML = ''; hc.appendChild(renderFreqChart(st.cpu_min_freq, st.cpu_max_freq, hc.clientWidth)); }
+
+			var hadLoadBaseline = !!loadBaseline;
+			var newLoadSample = pushLoadSample(st.cpu_ticks);
+			renderLoadHistoryCard();
+			if (!hadLoadBaseline && !newLoadSample) armLoadSeed();
 
 			// Control settings — the selects now always exist, so their presence can
 			// no longer signal "not rendered yet". Rebuild the container whenever the

@@ -794,3 +794,6 @@ msgstr ""
 
 msgid "Total received"
 msgstr ""
+
+msgid "CPU Usage History"
+msgstr ""
