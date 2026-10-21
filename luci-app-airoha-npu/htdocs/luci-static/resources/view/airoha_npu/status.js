@@ -571,8 +571,14 @@ function armLoadSeed() {
 	}, 1200);
 }
 
-/* Palette + dash policy for the per-core series (see ds-tokens.js). */
-var CORE_COLORS = [ 'var(--ai-core-0)', 'var(--ai-core-1)', 'var(--ai-core-2)', 'var(--ai-core-3)' ];
+/* Palette + dash policy for the per-core series (see ds-tokens.js). Every entry
+ * carries a literal fallback inside the var(): these boards are deployed by
+ * hand, so a stale ds-tokens.js can outlive this file, and an unresolvable
+ * token would paint the curves in the SVG default (no stroke at all). */
+var CORE_COLORS = [
+	'var(--ai-core-0, #0969da)', 'var(--ai-core-1, #bc4c00)',
+	'var(--ai-core-2, #8250df)', 'var(--ai-core-3, #bf3989)'
+];
 function coreColor(i) { return CORE_COLORS[i % CORE_COLORS.length]; }
 function coreDashed(i) { return i >= CORE_COLORS.length; }
 
@@ -598,7 +604,17 @@ function renderLoadLegend() {
 			dashed: coreDashed(c)
 		});
 	}
-	return aui.legend(items);
+	/* aui.legend() arrived together with this card, but the two files can drift
+	 * apart in a hand deployment (a stale ui.js served under the same resource
+	 * version). The throw would come out of render() and blank the whole page,
+	 * so degrade to a plain row: the card loses its colours, not the view. */
+	if (typeof aui.legend === 'function') return aui.legend(items);
+	return E('div', { 'class': 'ai-legend' }, items.map(function(item) {
+		/* The .ai-legend spacing lives in the same stale file, so the fallback
+		 * carries its own gap instead of relying on a stylesheet. */
+		return E('span', { 'class': 'ai-legend-item', 'style': 'margin-right:.75em' },
+			item.label + ' ' + item.value);
+	}));
 }
 
 /* Multi-line usage chart: fixed 0-100 % scale, one line per core. No area fill
