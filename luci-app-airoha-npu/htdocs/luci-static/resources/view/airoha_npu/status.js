@@ -574,10 +574,11 @@ function armLoadSeed() {
 /* Palette + dash policy for the per-core series (see ds-tokens.js). Every entry
  * carries a literal fallback inside the var(): these boards are deployed by
  * hand, so a stale ds-tokens.js can outlive this file, and an unresolvable
- * token would paint the curves in the SVG default (no stroke at all). */
+ * token would paint the curves in the SVG default (no stroke at all). The
+ * literals mirror the light-mode palette - it is the one that needs the aid. */
 var CORE_COLORS = [
-	'var(--ai-core-0, #0969da)', 'var(--ai-core-1, #bc4c00)',
-	'var(--ai-core-2, #8250df)', 'var(--ai-core-3, #bf3989)'
+	'var(--ai-core-0, #1663d6)', 'var(--ai-core-1, #e8590c)',
+	'var(--ai-core-2, #2f9e44)', 'var(--ai-core-3, #c2255c)'
 ];
 function coreColor(i) { return CORE_COLORS[i % CORE_COLORS.length]; }
 function coreDashed(i) { return i >= CORE_COLORS.length; }
