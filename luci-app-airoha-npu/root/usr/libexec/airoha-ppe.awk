@@ -21,7 +21,33 @@ function counter(name,    value) {
 	# Preserve 64-bit values without floating-point rounding.
 	return value ~ /^[0-9]+$/ ? quote(value) : "null"
 }
-BEGIN { total = shown = n4 = n6 = l2b = bnd = unb = fin = 0 }
+# Hex index -> number. busybox awk has no strtonum(), and a non-hex token
+# yields -1 so a malformed record can never land in the wrong table slice.
+function hexval(s,    i, c, d, n) {
+	n = 0
+	for (i = 1; i <= length(s); i++) {
+		c = tolower(substr(s, i, 1))
+		d = index("0123456789abcdef", c) - 1
+		if (d < 0) return -1
+		n = n * 16 + d
+	}
+	return n
+}
+function bucket(idx, state) {
+	if (idx < 0) return
+	if (idx < 8192) {
+		ppe1++
+		if (state == "BND") ppe1_bnd++
+	} else if (idx < 16384) {
+		ppe2++
+		if (state == "BND") ppe2_bnd++
+	} else {
+		dram++
+		if (state == "BND") dram_bnd++
+	}
+}
+BEGIN { total = shown = n4 = n6 = l2b = bnd = unb = fin = 0
+	ppe1 = ppe2 = dram = ppe1_bnd = ppe2_bnd = dram_bnd = 0 }
 # Some kernel versions expose only the bound count in ppe/bind.
 NF == 1 && $1 ~ /^[0-9]+$/ && (state_filter == "" || state_filter == "BND") {
 	total += $1
@@ -31,6 +57,9 @@ NF == 1 && $1 ~ /^[0-9]+$/ && (state_filter == "" || state_filter == "BND") {
 $1 ~ /^[0-9a-fA-F]+$/ && $2 ~ /^(BND|UNB|FIN|INV)$/ {
 	if (state_filter != "" && $2 != state_filter) next
 	total++
+	# Table slice of this record: first 8192 entries belong to PPE1, the next
+	# 8192 to PPE2 (AN7581 only) and everything above is the shared DRAM table.
+	bucket(hexval($1), $2)
 	if ($2 == "BND") bnd++
 	if ($2 == "UNB") unb++
 	if ($2 == "FIN") fin++
@@ -48,8 +77,14 @@ $1 ~ /^[0-9a-fA-F]+$/ && $2 ~ /^(BND|UNB|FIN|INV)$/ {
 		quote(field("vlan")), counter("packets"), counter("bytes"))
 }
 END {
-	printf "{\"available\":true,\"total\":%d,\"ipv4\":%d,\"ipv6\":%d,\"l2b\":%d,\"bound\":%d,\"unbound\":%d,\"finished\":%d,\"truncated\":%s,\"entries\":[",
-		total, n4, n6, l2b, bnd, unb, fin, (total > shown ? "true" : "false")
+	printf "{\"available\":true,\"total\":%d,\"ipv4\":%d,\"ipv6\":%d,\"l2b\":%d,\"bound\":%d,\"unbound\":%d,\"finished\":%d",
+		total, n4, n6, l2b, bnd, unb, fin
+	# A legacy kernel that only exposes the bound count gives us no index to
+	# slice, so omit the per-engine fields entirely instead of claiming 0.
+	if (ppe1 + ppe2 + dram > 0)
+		printf ",\"ppe1\":%d,\"ppe2\":%d,\"dram\":%d,\"ppe1_bound\":%d,\"ppe2_bound\":%d,\"dram_bound\":%d",
+			ppe1, ppe2, dram, ppe1_bnd, ppe2_bnd, dram_bnd
+	printf ",\"truncated\":%s,\"entries\":[", (total > shown ? "true" : "false")
 	for (i = 1; i <= shown; i++) {
 		if (i > 1) printf ","
 		printf "%s", entry[i]

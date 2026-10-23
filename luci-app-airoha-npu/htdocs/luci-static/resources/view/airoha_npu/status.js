@@ -26,6 +26,7 @@ var callGetDeviceMode = rpc.declare({ object: 'luci.airoha_npu', method: 'getDev
 var callGetTopology = rpc.declare({ object: 'luci.airoha_npu', method: 'getTopology' });
 var callGetWifiStats = rpc.declare({ object: 'luci.airoha_npu', method: 'getWifiStats' });
 var callFrameEngine = rpc.declare({ object: 'luci.airoha_npu', method: 'getFrameEngine' });
+var callCryptoInfo = rpc.declare({ object: 'luci.airoha_npu', method: 'getCryptoInfo' });
 var callSetCpuSettings = rpc.declare({ object: 'luci.airoha_npu', method: 'setCpuSettings', params: ['governor', 'freq'] });
 
 var CPU_MIN_FREQ_KHZ = 500000;
@@ -1139,16 +1140,19 @@ function renderGdmCard(g, topo) {
 	});
 }
 
-function renderCdmCard(c) {
+function renderCdmCard(c, split) {
 	c = c || {};
 	var cpu = Number(c.rx_cpu) || 0, hwf = Number(c.rx_hwf) || 0;
 	var total = cpu + hwf;
 	var pct = total > 0 ? hwf / total * 100 : 0;
 	var body = [
+		// HWF is the hardware-forwarding channel of this CDM, so the bar is the
+		// share of frames this engine received that bypassed the CPU - not the
+		// system-wide offload ratio and not the PPE binding rate.
 		aui.bar({
 			pct: pct,
 			accent: cdmOffloadAccent(pct, total),
-			title: _('Offload share'),
+			title: _('HW forwarding share'),
 			right: total > 0 ? aui.fmtPct(pct, 1) : '—'
 		}),
 		aui.row(_('CPU path'), aui.fmtK(cpu)),
@@ -1164,6 +1168,15 @@ function renderCdmCard(c) {
 	];
 	if ((Number(c.rx_cpu_drop) || 0) > 0) body.push(aui.row(_('CPU dropped'), aui.fmtK(c.rx_cpu_drop), 'ai-err'));
 	if ((Number(c.rx_hwf_drop) || 0) > 0) body.push(aui.row(_('HW dropped'), aui.fmtK(c.rx_hwf_drop), 'ai-err'));
+	// CDM1 is the CPU port of PPE engine 1 and CDM2 of engine 2, so each card
+	// also carries the flow-table slice counted by that engine. The split comes
+	// from the PPE probe (20 s cadence) and is undefined until it lands, and on
+	// a single-PPE SoC there is no CDM2 slice at all.
+	split = split || {};
+	var eng = Number(c.reg) === 2 ? 'ppe2' : Number(c.reg) === 1 ? 'ppe1' : '';
+	if (eng && typeof split[eng] !== 'undefined')
+		body.push(aui.row(eng === 'ppe2' ? _('PPE2 table') : _('PPE1 table'),
+			aui.fmtK(split[eng]) + ' · BND ' + aui.fmtK(split[eng + '_bound'] || 0)));
 	return aui.card({
 		name: 'CDM' + c.reg,
 		tag: 'CPU DMA',
@@ -1202,11 +1215,11 @@ function frameEngineReason(fe) {
 /* The whole frame-engine block, rendered inside the NPU & Offload Engine
  * section. GDM cards are restricted to the ports this board exposes; the CDM
  * cards and the PSE buffer are board-independent. */
-function renderFrameEngine(fe, topo) {
+function renderFrameEngine(fe, topo, split) {
 	fe = fe || {};
 	var head = E('div', { 'class': 'ai-subhead', 'style': 'margin-top:0' }, _('Frame Engine'));
 	var hint = E('p', { 'class': 'ai-hint' },
-		_('Register-level counters for the GDM data MACs and CDM DMA engines, read from the frame-engine block.'));
+		_('Register-level counters for the GDM data MACs and CDM DMA engines. The PPE table line on each CDM card is the flow-table slice owned by that engine.'));
 	if (fe.available === false) {
 		return E('div', { 'style': 'margin-top:var(--ds-sp-4)' }, [
 			head, hint, aui.empty(frameEngineReason(fe))
@@ -1229,9 +1242,59 @@ function renderFrameEngine(fe, topo) {
 	}
 	if (cdm.length) {
 		blocks.push(E('div', { 'class': 'ai-subhead' }, _('CDM Engines')));
-		blocks.push(E('div', { 'class': 'ai-grid ai-grid--3' }, cdm.map(renderCdmCard)));
+		blocks.push(E('div', { 'class': 'ai-grid ai-grid--3' }, cdm.map(function(c) {
+			return renderCdmCard(c, split);
+		})));
 	}
 	return E('div', { 'style': 'margin-top:var(--ds-sp-4)' }, blocks);
+}
+
+/* NSS (EIP93) crypto engine. Kept out of the frame-engine block: it is a
+ * separate IP block on the SoC and only the user-space half (/dev/crypto via
+ * cryptodev + OpenSSL devcrypto) depends on packages rather than the kernel. */
+function renderCryptoStatus(cr) {
+	var head = E('div', { 'class': 'ai-subhead', 'style': 'margin-top:0' }, 'EIP93');
+	var hint = E('p', { 'class': 'ai-hint' },
+		_('EIP93 hardware crypto engine plus the user-space /dev/crypto path (cryptodev + OpenSSL devcrypto).'));
+	if (!cr) {
+		return E('div', { 'style': 'margin-top:var(--ds-sp-4)' }, [ head, hint, aui.empty(_('No data')) ]);
+	}
+
+	var active = Number(cr.present) === 1;
+	var algos = Number(cr.algos) || 0;
+	var engineRow;
+	if (Number(cr.openssl) !== 1)
+		engineRow = _('openssl-util not installed');
+	else if (cr.engine === 1)
+		engineRow = aui.pill(_('Available'), 'ok');
+	else if (cr.engine === 0)
+		engineRow = aui.pill(_('Unavailable'), 'warn');
+	else
+		engineRow = '—';
+
+	var rows = [
+		aui.row(_('Status'), active ? aui.pill(_('Activated'), 'ok') : aui.pill(_('Driver unavailable'), 'warn')),
+		aui.row(_('Bound device'), active && Number(cr.bound) === 1 ? '1fb70000.crypto' : _('Not bound')),
+		aui.row(_('Algorithms'), String(algos)),
+		// /proc/crypto refcnt is the number of live tfm users on this engine, so
+		// it shows whether the accelerator is actually being driven right now.
+		aui.row(_('In use'), String(Number(cr.refcnt) || 0)),
+		aui.row('/dev/crypto', Number(cr.devcrypto) === 1 ? aui.pill(_('Available'), 'ok') : aui.pill(_('Unavailable'), 'warn')),
+		aui.row(_('OpenSSL devcrypto'), engineRow),
+		aui.row(_('Hardware IRQs'), typeof cr.irqs === 'number' ? aui.fmtK(cr.irqs) : '—')
+	];
+	var body = [ E('div', {}, rows) ];
+	if (algos > 0 && cr.algorithms)
+		body.push(E('p', { 'class': 'ai-hint', 'style': 'margin-top:var(--ds-sp-2)' }, cr.algorithms));
+
+	return E('div', { 'style': 'margin-top:var(--ds-sp-4)' }, [
+		head, hint,
+		aui.card({
+			name: _('Crypto Engine'), tag: 'AES / DES / authenc',
+			accent: active ? 'var(--ai-npu)' : 'var(--ds-border-strong)',
+			body: body
+		})
+	]);
 }
 
 /* ── NPU and PPE engine status ── */
@@ -1250,13 +1313,27 @@ function renderEngineStatus(st, ppe) {
 	var unbCount = (Array.isArray(ppe.entries) ? ppe.entries : []).filter(function(e) {
 		return e && e.state && e.state !== 'BND';
 	}).length;
+	// Per-engine split of the flow table. The backend buckets every scanned
+	// record by index (0-8191 PPE1, 8192-16383 PPE2, >=16384 shared DRAM), so
+	// these counts are not limited to the 1024-entry sample the table below
+	// shows. ppe1 is absent on a backend that predates the split, and ppe2
+	// stays 0 on the single-PPE AN7583 - both cases hide their row.
+	var ppe1 = Number(ppe.ppe1) || 0, ppe2 = Number(ppe.ppe2) || 0;
+	var dram = Number(ppe.dram) || 0;
+	var ppeRows = [
+		aui.row(_('Bound'), String(st.offload_bound || 0)),
+		aui.row(_('Total'), String(st.offload_total || 0)),
+		aui.row(_('Unbound'), String(unbCount))
+	];
+	if (typeof ppe.ppe1 !== 'undefined')
+		ppeRows.push(aui.row(_('PPE1 table'), ppe1 + ' · BND ' + (Number(ppe.ppe1_bound) || 0)));
+	if (ppe2 > 0)
+		ppeRows.push(aui.row(_('PPE2 table'), ppe2 + ' · BND ' + (Number(ppe.ppe2_bound) || 0)));
+	if (dram > 0)
+		ppeRows.push(aui.row(_('Shared DRAM'), dram + ' · BND ' + (Number(ppe.dram_bound) || 0)));
 	var ppeCard = aui.card({
 		name: 'PPE Engines', tag: 'P4 + P8', accent: 'var(--ai-npu)',
-		body: [
-			aui.row(_('Bound'), String(st.offload_bound || 0)),
-			aui.row(_('Total'), String(st.offload_total || 0)),
-			aui.row(_('Unbound'), String(unbCount))
-		]
+		body: ppeRows
 	});
 
 	return E('div', { 'class': 'ai-grid ai-grid--2', 'style': 'margin-top:var(--ds-sp-2)' }, [ ppeCard, npuCard ]);
@@ -1405,6 +1482,10 @@ return view.extend({
 		var latestPpeEntries = entries;
 		var ppeRequestSequence = 0;
 		var latestPpeRequest = 0;
+		// Last per-engine PPE slice seen in a real (non-deferred) PPE round. The
+		// CDM cards show it, but the PPE probe is on a 20 s cadence while the
+		// CDM block re-renders every 5 s, so it has to outlive a single reply.
+		var latestPpeSplit = (typeof ppe.ppe1 !== 'undefined') ? ppe : null;
 		var updatedEl = null;
 		// Last cpufreq reason, so the poll can rebuild the control container when
 		// the board's cpufreq availability changes. Null forces one rebuild once
@@ -1468,7 +1549,8 @@ return view.extend({
 					E('div', { 'id': 'offload-controls', 'style': 'margin-top:var(--ds-sp-3)' },
 						renderOffloadControls(topo, vo, flo, apo, bridgeBlocked)),
 					E('div', { 'id': 'engine-status' }, renderEngineStatus(st, ppe)),
-					E('div', { 'id': 'frame-engine' }, renderFrameEngine(fe, topo))
+					E('div', { 'id': 'crypto-status' }, renderCryptoStatus(null)),
+					E('div', { 'id': 'frame-engine' }, renderFrameEngine(fe, topo, ppe))
 				])
 			}),
 
@@ -1511,6 +1593,7 @@ return view.extend({
 			if (deferPpe !== true && requestSequence > latestPpeRequest) {
 				latestPpeRequest = requestSequence;
 				latestPpeEntries = Array.isArray(ppe.entries) ? ppe.entries : [];
+				if (typeof ppe.ppe1 !== 'undefined') latestPpeSplit = ppe;
 				updatePpeTable(latestPpeEntries, ppe);
 			}
 			updateSummary(st, ti);
@@ -1573,7 +1656,7 @@ return view.extend({
 			var engineEl = document.getElementById('engine-status');
 			if (engineEl) engineEl.replaceChildren(renderEngineStatus(st, ppe));
 			var feEl = document.getElementById('frame-engine');
-			if (feEl) feEl.replaceChildren(renderFrameEngine(fe, topo));
+			if (feEl) feEl.replaceChildren(renderFrameEngine(fe, topo, latestPpeSplit));
 			var epEl = document.getElementById('ethernet-ports');
 			if (epEl) { epEl.innerHTML = ''; epEl.appendChild(renderEthernetPorts(topo)); }
 			var wifiEl = document.getElementById('wifi-detail');
@@ -1648,6 +1731,18 @@ return view.extend({
 			});
 		}
 
+		// NSS Crypto is not part of the dashboard: its only expensive probe is
+		// the OpenSSL engine test (server-side cached for a minute), so it is
+		// pulled on first paint and then once per PPE cycle, about every 20 s.
+		function applyCrypto(cr) {
+			var el = document.getElementById('crypto-status');
+			if (el && cr) el.replaceChildren(renderCryptoStatus(cr));
+		}
+
+		function runCrypto() {
+			return _safeCall(callCryptoInfo(), null).then(applyCrypto);
+		}
+
 		// Poll cadence: the flow table does not need 5 s resolution, and it is
 		// the single most expensive probe on the board. Every 4th cycle (i.e.
 		// about every 20 s) asks for PPE; the three cycles in between skip it,
@@ -1657,6 +1752,7 @@ return view.extend({
 
 		function pollFetch() {
 			pollCount++;
+			if (pollCount % PPE_POLL_EVERY === 0) runCrypto();
 			return runFetch(pollCount % PPE_POLL_EVERY === 1);
 		}
 
@@ -1664,6 +1760,7 @@ return view.extend({
 		// (ports, CPU, NPU, frame engine - well under a second) renders as soon
 		// as it lands, then the flow table is fetched separately. Firing both at
 		// once would just put the expensive call back on the critical path.
+		runCrypto();
 		runFetch(false).then(function() {
 			return runFetch(true);
 		});

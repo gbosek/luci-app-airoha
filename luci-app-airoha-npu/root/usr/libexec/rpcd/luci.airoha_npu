@@ -656,6 +656,119 @@ get_frame_engine() {
 		"$pse_used" "$pse_free" "$gdm" "$cdm"
 }
 
+# NSS (EIP93) crypto engine snapshot.
+#
+# Every probe is independent and optional: a board built without
+# kmod-crypto-hw-eip93, without kmod-cryptodev or without the OpenSSL
+# devcrypto engine must still get a card that names what is missing, so no
+# check here assumes another succeeded.
+#
+# `openssl engine` is the only fork in this function (~50-100 ms on the SoC)
+# and the engine list cannot change before a reboot, so its answer is cached
+# for a minute to keep repeated page loads cheap.
+get_crypto_info() {
+	local present=0 bound=0 algos=0 refs=0 algolist="" chardev=0 openssl=0 engine="" irqs="null"
+	local dir now stamp saved age cache="/tmp/luci-airoha-npu.crypto.cache"
+
+	[ -d /sys/module/crypto_hw_eip93 ] && present=1
+	[ -e /dev/crypto ] && chardev=1
+
+	# Driver-name agnostic binding check: the DT node is crypto@1fb70000, so a
+	# bound platform device always shows up as 1fb70000.crypto, whatever
+	# directory the inside-secure driver registered itself under.
+	for dir in /sys/bus/platform/drivers/*/; do
+		[ -e "$dir/1fb70000.crypto" ] && { bound=1; break; }
+	done
+
+	# /proc/crypto prints a name line before its driver line, so remember the
+	# name and only count it when the driver is the EIP93 one. The match also
+	# accepts "safexcel" because the compatible string is
+	# inside-secure,safexcel-eip93ies and the driver name varies by kernel.
+	#
+	# refcnt is the number of live tfm users of that algorithm, and it is the
+	# only built-in counter this driver exposes (there is no debugfs node on the
+	# vendor kernel): summing it over the EIP93 blocks shows how many sessions
+	# are actually bound to the accelerator right now. The field ordering
+	# (driver before refcnt) holds on both 5.4 and 6.x, but `matched` is reset
+	# on every name line so a reordered or extra field can never leak a count
+	# from another block.
+	if [ -r /proc/crypto ]; then
+		algolist=$(awk '
+			/^name[ \t]*:/ {
+				name = $0
+				sub(/^name[ \t]*:[ \t]*/, "", name)
+				sub(/[ \t]+$/, "", name)
+				matched = 0
+			}
+			/^driver[ \t]*:/ {
+				if (tolower($0) ~ /eip93|safexcel/) {
+					matched = 1
+					if (name != "" && !(name in seen)) {
+						seen[name] = 1
+						list = list (n++ ? ", " : "") name
+					}
+				}
+			}
+			/^refcnt[ \t]*:/ {
+				if (matched) {
+					value = $0
+					sub(/^refcnt[ \t]*:[ \t]*/, "", value)
+					sub(/[ \t]+$/, "", value)
+					if (value ~ /^[0-9]+$/) refs += value
+				}
+			}
+			END { printf "%d|%d|%s", n + 0, refs + 0, list }
+		' /proc/crypto 2>/dev/null)
+		algos="${algolist%%|*}"
+		algolist="${algolist#*|}"
+		refs="${algolist%%|*}"
+		algolist="${algolist#*|}"
+		case "$algos" in ''|*[!0-9]*) algos=0 ;; esac
+		case "$refs" in ''|*[!0-9]*) refs=0 ;; esac
+	fi
+
+	# EIP93 sits on GIC SPI 44; the line name is the platform device
+	# (1fb70000.crypto) on newer kernels and the driver name on older ones, so
+	# both are accepted. Summing the per-CPU columns gives a since-boot total.
+	irqs=$(awk '
+		/crypto@1fb70000|1fb70000\.crypto|eip93/ {
+			found = 1
+			for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+$/) sum += $i
+		}
+		END { if (found) print sum + 0; else print "" }
+	' /proc/interrupts 2>/dev/null)
+	[ -n "$irqs" ] || irqs="null"
+
+	if command -v openssl >/dev/null 2>&1; then
+		openssl=1
+		now=$(date +%s 2>/dev/null)
+		case "$now" in ''|*[!0-9]*) now="" ;; esac
+		if [ -n "$now" ] && [ -s "$cache" ]; then
+			{ IFS= read -r stamp; IFS= read -r saved; } <"$cache" 2>/dev/null
+			case "$stamp" in ''|*[!0-9]*) stamp="" ;; esac
+			case "$saved" in 0|1) ;; *) saved="" ;; esac
+			if [ -n "$stamp" ] && [ -n "$saved" ] && [ "$now" -ge "$stamp" ] 2>/dev/null; then
+				age=$((now - stamp))
+				[ "$age" -lt 60 ] && engine="$saved"
+			fi
+		fi
+		if [ -z "$engine" ]; then
+			# Success prints "(devcrypto) ..." followed by " [ available ]";
+			# a missing engine prints an ENGINE_by_id error instead.
+			if openssl engine -t -c devcrypto 2>/dev/null | grep -q '\[ available \]'; then
+				engine=1
+			else
+				engine=0
+			fi
+			[ -n "$now" ] && printf '%s\n%s\n' "$now" "$engine" >"$cache" 2>/dev/null
+		fi
+	fi
+
+	printf '{"available":true,"present":%d,"bound":%d,"algos":%d,"refcnt":%d,"algorithms":"%s","devcrypto":%d,"openssl":%d,"engine":%s,"irqs":%s}' \
+		"$present" "$bound" "$algos" "$refs" "$(_json_escape "$algolist")" \
+		"$chardev" "$openssl" "${engine:-null}" "$irqs"
+}
+
 # Persist CPU governor / max_freq to UCI so the choice survives a reboot.
 _uci_persist_cpu() {
 	uci -q get airoha_npu.@cpu[0] >/dev/null 2>&1 || \
@@ -1140,7 +1253,7 @@ get_dashboard() {
 
 case "$1" in
 	list)
-		echo '{"getStatus":{},"getDashboard":{"ppe":"int"},"getTopology":{},"getPpeEntries":{},"getTokenInfo":{},"getFrameEngine":{},"getWifiStats":{},"getVlanOffload":{},"setVlanOffload":{"enabled":"int"},"getPppoeOffload":{},"setPppoeOffload":{"enabled":"int"},"getFlowOffload":{},"setFlowOffload":{"enabled":"int"},"getApModeOffload":{},"setApModeOffload":{"enabled":"int"},"getDeviceMode":{},"setGovernor":{"governor":"str"},"setMaxFreq":{"freq":"int"},"setCpuSettings":{"governor":"str","freq":"int"}}'
+		echo '{"getStatus":{},"getDashboard":{"ppe":"int"},"getTopology":{},"getPpeEntries":{},"getTokenInfo":{},"getFrameEngine":{},"getCryptoInfo":{},"getWifiStats":{},"getVlanOffload":{},"setVlanOffload":{"enabled":"int"},"getPppoeOffload":{},"setPppoeOffload":{"enabled":"int"},"getFlowOffload":{},"setFlowOffload":{"enabled":"int"},"getApModeOffload":{},"setApModeOffload":{"enabled":"int"},"getDeviceMode":{},"setGovernor":{"governor":"str"},"setMaxFreq":{"freq":"int"},"setCpuSettings":{"governor":"str","freq":"int"}}'
 		;;
 	call)
 		case "$2" in
@@ -1173,6 +1286,9 @@ case "$1" in
 				;;
 			getFrameEngine)
 				get_frame_engine
+				;;
+			getCryptoInfo)
+				get_crypto_info
 				;;
 			setGovernor)
 				read input
