@@ -1434,8 +1434,16 @@ function renderEngineStatus(st, ppe) {
 	 * high count alongside a low Bind rate is the actual explanation. The field
 	 * is only emitted by a backend that can see individual records. */
 	var zeroL2 = Number(ppe.zero_l2) || 0;
-	if (typeof ppe.zero_l2 !== 'undefined' && zeroL2 > 0)
-		ppeRows.push(aui.row(_('Zero-L2'), zeroL2 + ' · BND ' + (Number(ppe.zero_l2_bound) || 0), 'ai-err'));
+	if (typeof ppe.zero_l2 !== 'undefined' && zeroL2 > 0) {
+		// Red only once these entries dominate the table: a few all-zero L2
+		// headers are ordinary churn, but past half the table the entries that
+		// could bind have been crowded out, which is the fault worth flagging.
+		var tableTotal = Number(ppe.total) || Number(st.offload_total) || 0;
+		var zeroL2Share = tableTotal > 0 ? zeroL2 / tableTotal : 0;
+		ppeRows.push(aui.row(_('Zero-L2'),
+			zeroL2 + ' · BND ' + (Number(ppe.zero_l2_bound) || 0),
+			zeroL2Share >= 0.5 ? 'ai-err' : ''));
+	}
 	var ppeCard = aui.card({
 		name: 'PPE Engines', tag: 'P4 + P8', accent: 'var(--ai-npu)',
 		body: ppeRows
