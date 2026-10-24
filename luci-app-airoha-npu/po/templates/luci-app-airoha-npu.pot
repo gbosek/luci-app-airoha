@@ -861,7 +861,7 @@ msgstr ""
 msgid "Link down"
 msgstr ""
 
-msgid "Total received"
+msgid "Transmitted"
 msgstr ""
 
 msgid "CPU Usage History"

@@ -1165,6 +1165,14 @@ function cdmDeltaShare(c) {
 	return dh / (dc + dh) * 100;
 }
 
+/* A drop-counter row. Only the error colour depends on the value, so the row
+ * itself can stay in place: keeping it lets both CDM cards show the same set of
+ * counters in the same order. */
+function dropRow(label, value) {
+	var v = Number(value) || 0;
+	return aui.row(label, aui.fmtK(v), v > 0 ? 'ai-err' : '');
+}
+
 function renderCdmCard(c, split) {
 	c = c || {};
 	var cpu = Number(c.rx_cpu) || 0, hwf = Number(c.rx_hwf) || 0;
@@ -1172,6 +1180,7 @@ function renderCdmCard(c, split) {
 	var cumPct = total > 0 ? hwf / total * 100 : 0;
 	var deltaPct = cdmDeltaShare(c);
 	var pct = deltaPct === null ? cumPct : deltaPct;
+	var perCpu = [c.rx_cpu0, c.rx_cpu1, c.rx_cpu2, c.rx_cpu3].map(function(v) { return Number(v) || 0; });
 	var body = [
 		// HWF is the hardware-forwarding channel of this CDM, so the bar is the
 		// share of frames this engine received that bypassed the CPU - not the
@@ -1188,27 +1197,27 @@ function renderCdmCard(c, split) {
 		}),
 		aui.row(_('CPU path'), aui.fmtK(cpu)),
 		aui.row(_('HW forwarded'), aui.fmtK(hwf)),
-		// Register +0x00 of this CDM, presented as a total in its own right.
-		// It is NOT the sum of the CPU/HW delivery split above - on both test
-		// boards it runs on a separate frame stream and can sit far below
-		// rx_cpu - so the three lines must never be added up.
-		// The JSON key stays `tx`: the backend is deployed by hand to two
-		// devices, so renaming the field would break a device that is still
-		// running the old backend with a new frontend.
-		aui.row(_('Total received'), aui.fmtK(c.tx)),
-		aui.row(_('Since boot'), total > 0 ? aui.fmtPct(cumPct, 1) : '—')
+		// Register +0x00 of this CDM is TX_OK_CNT (vendor CDMA1_TX_OK_CNT): the
+		// frames the engine handed towards the switch. Measured deltas track the
+		// egress of its own netdevs (CDM1 vs lan1 tx, CDM2 vs pon0 tx), so this
+		// line belongs to the transmit stream and must never be summed with the
+		// RX split above.
+		aui.row(_('Transmitted'), aui.fmtK(c.tx)),
+		aui.row(_('Since boot'), total > 0 ? aui.fmtPct(cumPct, 1) : '—'),
+		// Everything below is rendered unconditionally, zeros included. CDM1 and
+		// CDM2 are the two CPU ports of the same IP block and the two receive
+		// channels are mutually exclusive in practice (one engine carries the
+		// fast-path stream, the other the PPE-bound stream), so hiding the idle
+		// channel's rows made the cards different heights and made a real 0 read
+		// like a field that was never collected.
+		aui.row(_('HW fast path'), aui.fmtK(c.rx_hwf_fast)),
+		aui.row(_('TSO queue'), aui.fmtK(c.rx_oq5)),
+		aui.row(_('Per-CPU RX'), perCpu.map(function(v) { return aui.fmtK(v); }).join(' · ')),
+		dropRow(_('CPU dropped'), c.rx_cpu_drop),
+		dropRow(_('HW dropped'), c.rx_hwf_drop),
+		dropRow(_('HW fast dropped'), c.rx_hwf_fast_drop),
+		dropRow(_('TSO dropped'), c.rx_oq5_drop)
 	];
-	// Fast-path and TSO streams counted separately by the CDM (vendor
-	// CDMA1_RXHWF_FAST_ALL / RXOQ5_OK). Only their drops are flagged.
-	if ((Number(c.rx_hwf_fast) || 0) > 0) body.push(aui.row(_('HW fast path'), aui.fmtK(c.rx_hwf_fast)));
-	if ((Number(c.rx_oq5) || 0) > 0) body.push(aui.row(_('TSO queue'), aui.fmtK(c.rx_oq5)));
-	var perCpu = [c.rx_cpu0, c.rx_cpu1, c.rx_cpu2, c.rx_cpu3].map(function(v) { return Number(v) || 0; });
-	if (perCpu.some(function(v) { return v > 0; }))
-		body.push(aui.row(_('Per-CPU RX'), perCpu.map(function(v) { return aui.fmtK(v); }).join(' · ')));
-	if ((Number(c.rx_cpu_drop) || 0) > 0) body.push(aui.row(_('CPU dropped'), aui.fmtK(c.rx_cpu_drop), 'ai-err'));
-	if ((Number(c.rx_hwf_drop) || 0) > 0) body.push(aui.row(_('HW dropped'), aui.fmtK(c.rx_hwf_drop), 'ai-err'));
-	if ((Number(c.rx_hwf_fast_drop) || 0) > 0) body.push(aui.row(_('HW fast dropped'), aui.fmtK(c.rx_hwf_fast_drop), 'ai-err'));
-	if ((Number(c.rx_oq5_drop) || 0) > 0) body.push(aui.row(_('TSO dropped'), aui.fmtK(c.rx_oq5_drop), 'ai-err'));
 	// CDM1 is the CPU port of PPE engine 1 and CDM2 of engine 2, so each card
 	// also carries the flow-table slice counted by that engine. The split comes
 	// from the PPE probe (20 s cadence) and is undefined until it lands, and on
@@ -1218,9 +1227,13 @@ function renderCdmCard(c, split) {
 	if (eng && typeof split[eng] !== 'undefined')
 		body.push(aui.row(eng === 'ppe2' ? _('PPE2 table') : _('PPE1 table'),
 			aui.fmtK(split[eng]) + ' · BND ' + aui.fmtK(split[eng + '_bound'] || 0)));
+	// The engine identity is the port role, not the direction: the mainline
+	// driver hands QDMA0 (CDM1) to the LAN netdevs and QDMA1 (CDM2) to the WAN
+	// one, and appends the PPE id accordingly (airoha_dev_set_qdma()).
+	var role = Number(c.reg) === 2 ? 'WAN' : Number(c.reg) === 1 ? 'LAN' : '';
 	return aui.card({
 		name: 'CDM' + c.reg,
-		tag: 'CPU DMA',
+		tag: role || 'CPU DMA',
 		accent: 'var(--ai-npu)',
 		body: body
 	});
