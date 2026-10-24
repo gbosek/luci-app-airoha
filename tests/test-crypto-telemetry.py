@@ -35,6 +35,25 @@ for name,base,expect in [('_gdm_json',256,{'tx':260,'rx':328,'rx_rc_drop':336,'r
     code='_devmem32_at() { return 1; }\n'+body+'\n'+name+' 1 '+str(base)+'\n'
     failed=subprocess.run(['sh','-c',code],capture_output=True,text=True)
     assert failed.returncode and not failed.stdout
+# Run the shipped frame-engine function; a read failure must differ from a
+# successfully measured zero without suppressing the other valid counters.
+frame=re.search(r'^get_frame_engine\(\) \{.*?^\}',rpc,re.M|re.S).group()
+for peak_read,expected in [('echo 589824',9),('echo 0',0),('return 1',None)]:
+    code=r'''
+devmem() { :; }
+_devmem32() {
+    case "$1" in
+        0x1fb50104) echo 327692;;
+        0x1fb50100) PEAK_READ;;
+        *) return 1;;
+    esac
+}
+_gdm_json() { printf '{"reg":%s}' "$1"; }
+_cdm_json() { printf '{"reg":%s}' "$1"; }
+'''.replace('PEAK_READ',peak_read)+frame+'\nget_frame_engine\n'
+    obj=json.loads(subprocess.check_output(['sh','-c',code],text=True))
+    assert obj['available'] and obj['pse']=={'used':5,'free':12,'peak':expected},obj
+    assert len(obj['gdm'])==3 and len(obj['cdm'])==2,obj
 acl=json.loads((root/'root/usr/share/rpcd/acl.d/luci-app-airoha-npu.json').read_text())
 assert any('getCryptoInfo' in v.get('read',{}).get('ubus',{}).get('luci.airoha_npu',[]) for v in acl.values())
 source=''.join(f'{idx} BND IPv4 5T orig=192.0.2.1:1->198.51.100.1:443 packets=18446744073709551615 bytes=18446744073709551615\n' for idx in ['0000','1fff','2000','3fff','4000'])
@@ -53,4 +72,4 @@ for parser in parsers:
     if a.runtime_parser and parser==a.runtime_parser:
         page=json.loads(subprocess.check_output(['awk','-v','limit=1','-v','offset=2','-f',str(parser)],input=source,text=True))
         assert page['total']==5 and page['entries'][0]['index']=='2000' and page['ppe1']==2 and page['has_more']
-print(json.dumps({'crypto_probes':'passed','irq_cpu_columns_only':True,'references_not_sessions':True,'parser_count':len(parsers),'full_scan_split_and_u64':'passed','pagination_preserved':bool(a.runtime_parser),'hardware_tested':False}))
+print(json.dumps({'crypto_probes':'passed','irq_cpu_columns_only':True,'references_not_sessions':True,'pse_peak_measured_zero_and_failure':'passed','parser_count':len(parsers),'full_scan_split_and_u64':'passed','pagination_preserved':bool(a.runtime_parser),'hardware_tested':False}))

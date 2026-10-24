@@ -32,6 +32,8 @@ implemented driver binding path has been measured to stop with that switch.
   neither path may truncate the summary to the returned row count.
 - A larger BND count establishes neither greater throughput nor better
   stability. Driver eligibility, lifecycle and the observed workload matter.
+- PSE shared-buffer peak is a hardware high-water mark, separate from the
+  current occupancy. A failed peak-register read remains `null`, not zero.
 
 The reviewed XG2010G images have identical 1456-62 NPU program/data bytes.
 The meaningful change is the host driver binding path. This compatibility

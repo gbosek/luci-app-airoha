@@ -94,6 +94,13 @@ var COMPONENT_CSS = [
 
 	'.ai-pill{display:inline-flex;align-items:center;gap:var(--ds-sp-2);min-height:20px;padding:0 var(--ds-sp-2);border:1px solid var(--ds-border);border-radius:var(--ds-r-pill);background:var(--ds-surface-sunken);font-size:var(--ds-fs-xs);font-weight:650;color:var(--ds-text-muted);white-space:nowrap}',
 	'.ai-pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}',
+	/* A count makes the header a single, never-wrapping row: the pill keeps its
+	 * intrinsic width and the title ellipsises instead of pushing it to a second
+	 * line. Sections without a count keep the wrapping behaviour. */
+	'.ai-section-head--tight{flex-wrap:nowrap}',
+	'.ai-section-head--tight h3{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+	'.ai-section-head--tight .ai-pill{flex:0 0 auto}',
+	'.ai-count{font-family:var(--ds-mono);font-variant-numeric:tabular-nums}',
 	'.ai-pill--ok{color:var(--ds-ok);border-color:var(--ds-ok-line);background:var(--ds-ok-tint)}',
 	'.ai-pill--warn{color:var(--ds-warn);border-color:var(--ds-warn-line);background:var(--ds-warn-tint)}',
 	'.ai-pill--error{color:var(--ds-error);border-color:var(--ds-error-line);background:var(--ds-error-tint)}',
@@ -118,7 +125,12 @@ var COMPONENT_CSS = [
 	'.ai-bar{margin:var(--ds-sp-1) 0 0}',
 	'.ai-bar-head{display:flex;align-items:baseline;justify-content:space-between;gap:var(--ds-sp-2);font-size:var(--ds-fs-xs);color:var(--ds-text-muted)}',
 	'.ai-bar-track{position:relative;height:.5em;margin-top:var(--ds-sp-1);border-radius:var(--ds-r-sm);background:var(--ds-surface-sunken);border:1px solid var(--ds-border);overflow:hidden}',
-	'.ai-bar-fill{height:100%;border-radius:var(--ds-r-sm);background:var(--ai-accent,var(--ds-primary));transition:width .4s}',
+	'.ai-bar-fill{position:absolute;left:0;top:0;bottom:0;border-radius:var(--ds-r-sm);background:var(--ai-accent,var(--ds-primary));background-image:linear-gradient(180deg,rgba(255,255,255,.32),rgba(255,255,255,0) 62%);transition:width .4s}',
+	'.ai-bar-peak{position:absolute;left:0;top:0;bottom:0;background:var(--ai-accent,var(--ds-primary));opacity:.2;pointer-events:none;transition:width .4s}',
+	'.ai-bar--pill .ai-bar-track,.ai-bar--pill .ai-bar-fill,.ai-bar--pill .ai-bar-peak{border-radius:999px}',
+	/* A .5em track is already fully rounded at 4px, so the capsule shape only
+	 * reads once the bar is thick enough to show its straight middle section. */
+	'.ai-bar--pill .ai-bar-track{height:1em}',
 	'.ai-bar--tall .ai-bar-head{font-size:var(--ds-fs-sm)}',
 	'.ai-bar--tall .ai-bar-track{height:3.4em}',
 	'.ai-bar--tall .ai-bar-label{font-size:var(--ds-fs-base)}',
@@ -275,11 +287,13 @@ function section(o) {
 	var attrs = { 'class': 'ai-section' };
 	if (o.id) attrs.id = o.id;
 	if (o.wifiOnly) attrs['data-wifi-only'] = '1';
+	/* The count rides at the far right of the title bar as a capsule rather than
+	 * a second line, so the header stays one row tall. */
 	return E('section', attrs, [
-		E('div', { 'class': 'ai-section-head' }, [
+		E('div', { 'class': 'ai-section-head' + (o.count ? ' ai-section-head--tight' : '') }, [
 			E('h3', {}, o.title),
-			o.count ? E('span', { 'class': 'ai-badge', 'id': o.countId || null }, o.count) : null,
 			E('span', { 'class': 'ai-spacer' }),
+			o.count ? E('span', { 'class': 'ai-pill ai-count', 'id': o.countId || null }, o.count) : null,
 			o.actions || null
 		]),
 		o.hint ? E('p', { 'class': 'ai-hint' }, o.hint) : null,
@@ -323,10 +337,14 @@ function bar(o) {
 		'class': 'ai-bar-track', 'role': 'progressbar', 'aria-valuemin': '0',
 		'aria-valuemax': '100', 'aria-valuenow': String(Math.round(pct)), 'aria-label': o.title || ''
 	}, [
+		o.peak != null ? E('div', {
+			'class': 'ai-bar-peak',
+			'style': 'width:' + clampPct(o.peak).toFixed(1) + '%'
+		}) : null,
 		E('div', fillAttrs),
 		o.label ? E('span', { 'class': 'ai-bar-label', 'id': o.labelId || null }, o.label) : null
 	]);
-	var attrs = { 'class': 'ai-bar' + (o.tall ? ' ai-bar--tall' : ''), 'style': '--ai-accent:' + (o.accent || 'var(--ds-primary)') };
+	var attrs = { 'class': 'ai-bar' + (o.tall ? ' ai-bar--tall' : '') + (o.pill ? ' ai-bar--pill' : ''), 'style': '--ai-accent:' + (o.accent || 'var(--ds-primary)') };
 	if (o.id) attrs.id = o.id;
 	return E('div', attrs, [ head, track ]);
 }
