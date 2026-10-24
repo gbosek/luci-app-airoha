@@ -37,11 +37,17 @@ msgstr "Airoha SoC状态"
 msgid "Airtime"
 msgstr "空口效率"
 
+msgid "Algorithms"
+msgstr "算法"
+
 msgid "Architecture"
 msgstr "架构"
 
 msgid "Auto-detected"
 msgstr "自动检测"
+
+msgid "Available"
+msgstr "可用"
 
 msgid "BND = bound to hardware (NPU path); UNB = learning (CPU path). The client renders the first 100 rows."
 msgstr "BND = 已绑定硬件（走 NPU）；UNB = 学习中（走 CPU）。前端最多渲染前 100 行。"
@@ -63,6 +69,9 @@ msgstr "全部"
 
 msgid "Bound"
 msgstr "已绑定"
+
+msgid "Bound device"
+msgstr "绑定设备"
 
 msgid "Bound / total PPE flows"
 msgstr "已绑定 / PPE 总表项"
@@ -175,6 +184,9 @@ msgstr "核心数量"
 msgid "Critical"
 msgstr "危险"
 
+msgid "Crypto Engine"
+msgstr "加密引擎"
+
 msgid "DETECTING"
 msgstr "探测中"
 
@@ -256,17 +268,26 @@ msgstr "硬件加速"
 msgid "HW Buffer"
 msgstr "硬件缓冲"
 
+msgid "HW forwarding share"
+msgstr "硬件转发占比"
+
 msgid "HW offload is enabled but ISP latency is high. Latency management may be skipped by hardware acceleration."
 msgstr "硬件加速已启用，但 ISP 延迟较高。延迟管理可能被硬件加速跳过。"
 
 msgid "Hardware errors detected on WAN. Check WAN cable or SFP. Latency stats may be misleading."
 msgstr "检测到 WAN 硬件错误。请检查 WAN 网线或 SFP。延迟统计可能不准确。"
 
+msgid "Hardware IRQs"
+msgstr "硬件中断"
+
 msgid "IDLE"
 msgstr "空闲"
 
 msgid "Idle"
 msgstr "空闲"
+
+msgid "Algorithm references"
+msgstr "算法引用数"
 
 msgid "Index"
 msgstr "索引"
@@ -343,6 +364,9 @@ msgstr "NPU 设备就绪"
 msgid "NPU state"
 msgstr "NPU 状态"
 
+msgid "EIP93 hardware crypto engine plus the user-space /dev/crypto path (cryptodev + OpenSSL devcrypto)."
+msgstr "EIP93 硬件加密引擎，以及用户态 /dev/crypto 通道（cryptodev + OpenSSL devcrypto）。"
+
 msgid "New Flow"
 msgstr "新连接"
 
@@ -388,23 +412,29 @@ msgstr "正常"
 msgid "Not Activated"
 msgstr "未激活"
 
+msgid "Not bound"
+msgstr "未绑定"
+
 msgid "Not provided without wireless hardware"
 msgstr "无无线硬件时后端不返回"
 
 msgid "ONU state"
 msgstr "ONU 状态"
 
+msgid "OpenSSL devcrypto"
+msgstr "OpenSSL devcrypto"
+
 msgid "Offload Statistics"
 msgstr "卸载统计"
-
-msgid "Offload share"
-msgstr "加速占比"
 
 msgid "Optical module"
 msgstr "光模块"
 
 msgid "Optical signal present"
 msgstr "有光信号"
+
+msgid "openssl-util not installed"
+msgstr "未安装 openssl-util"
 
 msgid "Original Flow"
 msgstr "原始连接"
@@ -432,6 +462,12 @@ msgstr "PPE 流量监控"
 
 msgid "PPE Flow Offload Entries"
 msgstr "PPE 硬件加速表"
+
+msgid "PPE1 table"
+msgstr "PPE1 表区"
+
+msgid "PPE2 table"
+msgstr "PPE2 表区"
 
 msgid "PPPoE Offload"
 msgstr "PPPoE 透传卸载"
@@ -504,6 +540,9 @@ msgstr "保存"
 
 msgid "Sent"
 msgstr "累计发送"
+
+msgid "Shared DRAM"
+msgstr "共享 DRAM"
 
 msgid "Signal"
 msgstr "信号"
@@ -748,8 +787,8 @@ msgstr "此处开关用于应用本设备的硬件卸载设置。"
 msgid "Frame Engine"
 msgstr "帧引擎"
 
-msgid "Register-level counters for the GDM data MACs and CDM DMA engines, read from the frame-engine block."
-msgstr "直接读取帧引擎寄存器，展示 GDM 数据 MAC 与 CDM DMA 引擎的计数。"
+msgid "Register-level counters for the GDM data MACs and CDM DMA engines. The PPE table line on each CDM card is the flow-table slice owned by that engine."
+msgstr "GDM 数据 MAC 与 CDM DMA 引擎的寄存器级计数。每张 CDM 卡片上的 PPE 表区行是该引擎所辖的流表分片。"
 
 msgid "GDM Ports"
 msgstr "GDM 端口"
