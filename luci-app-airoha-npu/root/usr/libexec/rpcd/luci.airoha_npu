@@ -577,51 +577,112 @@ _devmem32_at() {
 	_devmem32 "$(printf '0x%x' $(( ($1) + ($2) )))"
 }
 
-# JSON for one GDM port: TX_OK +0x04, TX_DROP +0x08, RX_OK +0x48, RX_DROP +0x4c.
+# JSON for one GDM port: TX_OK +0x04, TX_DROP +0x08, RX_OK +0x48, RX_FC_DROP +0x4c,
+# plus the three other RX drop reasons +0x50/+0x54/+0x58. The four RX reasons are
+# the vendor's GDMA1_RX_FC/RC/OVER/ERROR_DROP_CNT and the kernel's
+# REG_FE_GDM_RX_FC/RC/OVERFLOW/ERROR_DROP_CNT - the same words, documented on
+# both sides.
 _gdm_json() {
-	local reg="$1" base="$2" tx tx_drop rx rx_drop
+	local reg="$1" base="$2" tx tx_drop rx rx_drop rc_drop over_drop err_drop
 	tx=$(_devmem32_at "$base" 0x04) || return 1
 	tx_drop=$(_devmem32_at "$base" 0x08) || return 1
 	rx=$(_devmem32_at "$base" 0x48) || return 1
 	rx_drop=$(_devmem32_at "$base" 0x4c) || return 1
-	printf '{"reg":%s,"tx":%s,"tx_drop":%s,"rx":%s,"rx_drop":%s}' \
-		"$reg" "$tx" "$tx_drop" "$rx" "$rx_drop"
+	rc_drop=$(_devmem32_at "$base" 0x50) || return 1
+	over_drop=$(_devmem32_at "$base" 0x54) || return 1
+	err_drop=$(_devmem32_at "$base" 0x58) || return 1
+	printf '{"reg":%s,"tx":%s,"tx_drop":%s,"rx":%s,"rx_drop":%s,"rx_rc_drop":%s,"rx_over_drop":%s,"rx_error_drop":%s}' \
+		"$reg" "$tx" "$tx_drop" "$rx" "$rx_drop" \
+		"$rc_drop" "$over_drop" "$err_drop"
 }
 
-# JSON for one CDM engine: TX_OK +0x00, RXCPU_OK +0x10, RXHWF_OK +0x14,
-# RXCPU_DROP +0x20, RXHWF_DROP +0x24.
+# JSON for one CDM engine, base = GDMA_BASE + 0x80. The five long-standing
+# fields are TX_OK +0x00, RXCPU_OK +0x10, RXHWF_OK +0x14, RXCPU_DROP +0x20 and
+# RXHWF_DROP +0x24; the rest are the EN7581/EN7523 branch of the vendor's
+# CDMA1_* set (fe_reg_en7512.h), at GDMA_BASE +0x8c/+0x98/+0x9c/+0xa8/+0xac/
+# +0xb0..+0xbc/+0xd0..+0xdc:
+#   +0x0c RXCPU_KA (keep-alive), +0x18 RXHWF_FAST_ALL, +0x1c RXOQ5_OK (TSO),
+#   +0x28 RXHWF_FAST_DROP, +0x2c RXOQ5_DROP, +0x30..0x3c per-CPU RX_OK,
+#   +0x50..0x5c per-CPU RX_DROP.
 #
 # The +0x00 word keeps the JSON key "tx" (renaming it would break a device
-# still running this older backend behind a newer view), but the UI shows it as
-# "Total received": it is a per-engine total of its own and is NOT the sum of
-# the CPU/HW delivery split - on the two test boards it advances on a different
-# frame stream and can stay far below rx_cpu.
+# still running this older backend behind a newer view). +0x00 is TX_OK_CNT,
+# presented as transmitted frames, separate from the RX CPU/HW delivery split.
 _cdm_json() {
-	local reg="$1" base="$2" tx rxcpu rxhwf rxcpud rxhwfd
+	local reg="$1" base="$2"
+	local tx rxcpu rxhwf rxcpud rxhwfd
+	local rxka hwffast oq5 hwffastd oq5d
+	local cpu0 cpu1 cpu2 cpu3 cpu0d cpu1d cpu2d cpu3d
+
 	tx=$(_devmem32_at "$base" 0x00) || return 1
 	rxcpu=$(_devmem32_at "$base" 0x10) || return 1
 	rxhwf=$(_devmem32_at "$base" 0x14) || return 1
 	rxcpud=$(_devmem32_at "$base" 0x20) || return 1
 	rxhwfd=$(_devmem32_at "$base" 0x24) || return 1
-	printf '{"reg":%s,"tx":%s,"rx_cpu":%s,"rx_hwf":%s,"rx_cpu_drop":%s,"rx_hwf_drop":%s}' \
-		"$reg" "$tx" "$rxcpu" "$rxhwf" "$rxcpud" "$rxhwfd"
+	rxka=$(_devmem32_at "$base" 0x0c) || return 1
+	hwffast=$(_devmem32_at "$base" 0x18) || return 1
+	oq5=$(_devmem32_at "$base" 0x1c) || return 1
+	hwffastd=$(_devmem32_at "$base" 0x28) || return 1
+	oq5d=$(_devmem32_at "$base" 0x2c) || return 1
+	cpu0=$(_devmem32_at "$base" 0x30) || return 1
+	cpu1=$(_devmem32_at "$base" 0x34) || return 1
+	cpu2=$(_devmem32_at "$base" 0x38) || return 1
+	cpu3=$(_devmem32_at "$base" 0x3c) || return 1
+	cpu0d=$(_devmem32_at "$base" 0x50) || return 1
+	cpu1d=$(_devmem32_at "$base" 0x54) || return 1
+	cpu2d=$(_devmem32_at "$base" 0x58) || return 1
+	cpu3d=$(_devmem32_at "$base" 0x5c) || return 1
+
+	printf '{"reg":%s,"tx":%s,"rx_cpu":%s,"rx_hwf":%s,"rx_cpu_drop":%s,"rx_hwf_drop":%s,"rx_cpu_ka":%s,"rx_hwf_fast":%s,"rx_oq5":%s,"rx_hwf_fast_drop":%s,"rx_oq5_drop":%s,"rx_cpu0":%s,"rx_cpu1":%s,"rx_cpu2":%s,"rx_cpu3":%s,"rx_cpu0_drop":%s,"rx_cpu1_drop":%s,"rx_cpu2_drop":%s,"rx_cpu3_drop":%s}' \
+		"$reg" "$tx" "$rxcpu" "$rxhwf" "$rxcpud" "$rxhwfd" \
+		"$rxka" "$hwffast" "$oq5" "$hwffastd" "$oq5d" \
+		"$cpu0" "$cpu1" "$cpu2" "$cpu3" \
+		"$cpu0d" "$cpu1d" "$cpu2d" "$cpu3d"
 }
 
 get_frame_engine() {
-	local psb pse_used pse_free gdm cdm entry reg base spec
+	local psb pse_used pse_free pse_ports gdm cdm entry reg base spec
+	local i v iq oq
 
 	if ! command -v devmem >/dev/null 2>&1; then
 		printf '{"available":false,"reason":"devmem_unavailable"}'
 		return
 	fi
 
-	# PSE shared buffer: [31:16] buffers in use, [14:0] free.
+	# PSE shared buffer: [30:16] buffers in use, [14:0] free. Both halves are
+	# 0x7fff fields as the vendor defines them (PSE_SHARE_BUF_USED_CNT_MASK /
+	# PSE_SHARE_BUF_FREE_CNT_MASK); reading the whole upper half as 0xffff
+	# would include a reserved bit that is not part of the count.
 	psb=$(_devmem32 0x1fb50104) || {
 		printf '{"available":false,"reason":"register_read_failed"}'
 		return
 	}
-	pse_used=$(( (psb >> 16) & 0xFFFF ))
+	pse_used=$(( (psb >> 16) & 0x7FFF ))
 	pse_free=$(( psb & 0x7FFF ))
+
+	# PSE per-port queue occupancy: 0x150 + 4i, [30:16] IQ frames, [14:0] OQ.
+	# The vendor only defines P0..P9 (ten ports, fe_reg_en7512.h), even though
+	# PSE_PORT_NUM is 11 on EN7581 - port 10 shares its register window with the
+	# first drop word, so ten is the readable set.
+	#
+	# No PSE drop counter is published here on purpose. The vendor maps
+	# PSE_DROP_CNT(i) to FE+0x178+4i on this chip family, but on both test boards
+	# that word never reads back monotonically (back-to-back reads returned
+	# 0xe0000, 0, 0x80000, 0x40000, ...), so it is not the accumulator its name
+	# suggests; the EN7523 layout at FE+0x120 reads a constant 0 and cannot be
+	# told apart from an unimplemented address without forcing drops. Drop
+	# visibility is taken from the GDM MIB reason counters below instead, which
+	# both the vendor and the mainline kernel document at the same offsets.
+	pse_ports=""
+	i=0
+	while [ "$i" -lt 10 ]; do
+		v=$(_devmem32 "$(printf '0x%x' $(( 0x1fb50150 + i * 4 )))") || break
+		iq=$(( (v >> 16) & 0x7FFF ))
+		oq=$(( v & 0x7FFF ))
+		[ -z "$pse_ports" ] || pse_ports="$pse_ports,"
+		pse_ports="$pse_ports{\"port\":$i,\"iq\":$iq,\"oq\":$oq}"
+		i=$(( i + 1 ))
+	done
 
 	# GDM register blocks, keyed by the device-tree ethernet@N index so the
 	# frontend can label each card from the same topology the port table uses.
@@ -652,8 +713,8 @@ get_frame_engine() {
 		return
 	fi
 
-	printf '{"available":true,"pse":{"used":%s,"free":%s},"gdm":[%s],"cdm":[%s]}' \
-		"$pse_used" "$pse_free" "$gdm" "$cdm"
+	printf '{"available":true,"pse":{"used":%s,"free":%s,"ports":[%s]},"gdm":[%s],"cdm":[%s]}' \
+		"$pse_used" "$pse_free" "$pse_ports" "$gdm" "$cdm"
 }
 
 # NSS (EIP93) crypto engine snapshot.
@@ -667,7 +728,7 @@ get_frame_engine() {
 # and the engine list cannot change before a reboot, so its answer is cached
 # for a minute to keep repeated page loads cheap.
 get_crypto_info() {
-	local present=0 bound=0 algos=0 refs=0 algolist="" chardev=0 openssl=0 engine="" irqs="null"
+	local present=0 bound=0 algos=0 refs=0 algostat="" chardev=0 openssl=0 engine="" irqs="null"
 	local dir now stamp saved age cache="/tmp/luci-airoha-npu.crypto.cache"
 
 	[ -d /sys/module/crypto_hw_eip93 ] && present=1
@@ -686,13 +747,13 @@ get_crypto_info() {
 	# accepts "safexcel" because the compatible string is
 	# inside-secure,safexcel-eip93ies and the driver name varies by kernel.
 	#
-	# refcnt includes algorithm/module references; it is not an active-session
-	# count or a measurement of hardware load. The field ordering
+	# Publish counts only. refcnt includes algorithm/module references, not
+	# active sessions or hardware load. The field ordering
 	# (driver before refcnt) holds on both 5.4 and 6.x, but `matched` is reset
 	# on every name line so a reordered or extra field can never leak a count
 	# from another block.
 	if [ -r /proc/crypto ]; then
-		algolist=$(awk '
+		algostat=$(awk '
 			/^name[ \t]*:/ {
 				name = $0
 				sub(/^name[ \t]*:[ \t]*/, "", name)
@@ -704,7 +765,7 @@ get_crypto_info() {
 					matched = 1
 					if (name != "" && !(name in seen)) {
 						seen[name] = 1
-						list = list (n++ ? ", " : "") name
+						n++
 					}
 				}
 			}
@@ -716,12 +777,10 @@ get_crypto_info() {
 					if (value ~ /^[0-9]+$/) refs += value
 				}
 			}
-			END { printf "%d|%d|%s", n + 0, refs + 0, list }
+			END { printf "%d|%d", n + 0, refs + 0 }
 		' /proc/crypto 2>/dev/null)
-		algos="${algolist%%|*}"
-		algolist="${algolist#*|}"
-		refs="${algolist%%|*}"
-		algolist="${algolist#*|}"
+		algos="${algostat%%|*}"
+		refs="${algostat#*|}"
 		case "$algos" in ''|*[!0-9]*) algos=0 ;; esac
 		case "$refs" in ''|*[!0-9]*) refs=0 ;; esac
 	fi
@@ -763,8 +822,8 @@ get_crypto_info() {
 		fi
 	fi
 
-	printf '{"available":true,"present":%d,"bound":%d,"algos":%d,"refcnt":%d,"algorithms":"%s","devcrypto":%d,"openssl":%d,"engine":%s,"irqs":%s}' \
-		"$present" "$bound" "$algos" "$refs" "$(_json_escape "$algolist")" \
+	printf '{"available":true,"present":%d,"bound":%d,"algos":%d,"refcnt":%d,"devcrypto":%d,"openssl":%d,"engine":%s,"irqs":%s}' \
+		"$present" "$bound" "$algos" "$refs" \
 		"$chardev" "$openssl" "${engine:-null}" "$irqs"
 }
 

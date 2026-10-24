@@ -1125,6 +1125,11 @@ function renderGdmCard(g, topo) {
 	g = g || {};
 	var tx = Number(g.tx) || 0, rx = Number(g.rx) || 0;
 	var txDrop = Number(g.tx_drop) || 0, rxDrop = Number(g.rx_drop) || 0;
+	// The three RX reasons behind +0x50/+0x54/+0x58: resource (no buffer),
+	// overflow (queue full) and error (bad frame). They are separate MIB words,
+	// so a single "RX dropped" line would hide which one fired.
+	var rcDrop = Number(g.rx_rc_drop) || 0, overDrop = Number(g.rx_over_drop) || 0;
+	var errDrop = Number(g.rx_error_drop) || 0;
 	var port = gdmPort(topo, g.reg);
 	var body = [
 		aui.row(_('TX packets'), aui.fmtK(tx)),
@@ -1132,6 +1137,9 @@ function renderGdmCard(g, topo) {
 	];
 	if (txDrop > 0) body.push(aui.row(_('TX dropped'), aui.fmtK(txDrop), 'ai-err'));
 	if (rxDrop > 0) body.push(aui.row(_('RX dropped'), aui.fmtK(rxDrop), 'ai-err'));
+	if (rcDrop > 0) body.push(aui.row(_('RX resource dropped'), aui.fmtK(rcDrop), 'ai-err'));
+	if (overDrop > 0) body.push(aui.row(_('RX overflow dropped'), aui.fmtK(overDrop), 'ai-err'));
+	if (errDrop > 0) body.push(aui.row(_('RX error dropped'), aui.fmtK(errDrop), 'ai-err'));
 	return aui.card({
 		name: 'GDM' + g.reg,
 		tag: port ? humanPortName(port, topo) : _('No port'),
@@ -1140,15 +1148,47 @@ function renderGdmCard(g, topo) {
 	});
 }
 
+/* Share of the CDM RX split over the last render interval. Kept per engine
+ * outside the render so it survives re-renders, and null on the first sample
+ * (or after a counter reset), where the cumulative value is the only answer. */
+var cdmPrevSample = {};
+function cdmDeltaShare(c) {
+	var reg = String(c.reg);
+	var cpu = Number(c.rx_cpu) || 0, hwf = Number(c.rx_hwf) || 0;
+	var prev = cdmPrevSample[reg];
+	cdmPrevSample[reg] = { cpu: cpu, hwf: hwf };
+	if (!prev) return null;
+	var dc = cpu - prev.cpu, dh = hwf - prev.hwf;
+	// The registers only grow; a decrease means a reset or a different boot,
+	// so that interval carries no share.
+	if (dc < 0 || dh < 0 || dc + dh <= 0) return null;
+	return dh / (dc + dh) * 100;
+}
+
+/* A drop-counter row. Only the error colour depends on the value, so the row
+ * itself can stay in place: keeping it lets both CDM cards show the same set of
+ * counters in the same order. */
+function dropRow(label, value) {
+	var v = Number(value) || 0;
+	return aui.row(label, aui.fmtK(v), v > 0 ? 'ai-err' : '');
+}
+
 function renderCdmCard(c) {
 	c = c || {};
 	var cpu = Number(c.rx_cpu) || 0, hwf = Number(c.rx_hwf) || 0;
 	var total = cpu + hwf;
-	var pct = total > 0 ? hwf / total * 100 : 0;
+	var cumPct = total > 0 ? hwf / total * 100 : 0;
+	var deltaPct = cdmDeltaShare(c);
+	var pct = deltaPct === null ? cumPct : deltaPct;
+	var perCpu = [c.rx_cpu0, c.rx_cpu1, c.rx_cpu2, c.rx_cpu3].map(function(v) { return Number(v) || 0; });
 	var body = [
 		// HWF is the hardware-forwarding channel of this CDM, so the bar is the
 		// share of frames this engine received that bypassed the CPU - not the
 		// system-wide offload ratio and not the PPE binding rate.
+		// Registers are since-boot accumulators: the cumulative ratio is
+		// dominated by everything that happened since power-on and barely moves
+		// between two 5 s polls, so the bar uses the interval and the
+		// "Since boot" line keeps the cumulative value visible.
 		aui.bar({
 			pct: pct,
 			accent: cdmOffloadAccent(pct, total),
@@ -1157,26 +1197,41 @@ function renderCdmCard(c) {
 		}),
 		aui.row(_('CPU path'), aui.fmtK(cpu)),
 		aui.row(_('HW forwarded'), aui.fmtK(hwf)),
-		// Register +0x00 of this CDM, presented as a total in its own right.
-		// It is NOT the sum of the CPU/HW delivery split above - on both test
-		// boards it runs on a separate frame stream and can sit far below
-		// rx_cpu - so the three lines must never be added up.
-		// The JSON key stays `tx`: the backend is deployed by hand to two
-		// devices, so renaming the field would break a device that is still
-		// running the old backend with a new frontend.
-		aui.row(_('Total received'), aui.fmtK(c.tx))
+		// Register +0x00 of this CDM is TX_OK_CNT (vendor CDMA1_TX_OK_CNT): the
+		// frames the engine handed towards the switch. Measured deltas track the
+		// egress of its own netdevs (CDM1 vs lan1 tx, CDM2 vs pon0 tx), so this
+		// line belongs to the transmit stream and must never be summed with the
+		// RX split above.
+		aui.row(_('Transmitted'), aui.fmtK(c.tx)),
+		aui.row(_('Since boot'), total > 0 ? aui.fmtPct(cumPct, 1) : '—'),
+		// Everything below is rendered unconditionally, zeros included. CDM1 and
+		// CDM2 are the two CPU ports of the same IP block and the two receive
+		// channels are mutually exclusive in practice (one engine carries the
+		// fast-path stream, the other the PPE-bound stream), so hiding the idle
+		// channel's rows made the cards different heights and made a real 0 read
+		// like a field that was never collected.
+		aui.row(_('HW fast path'), aui.fmtK(c.rx_hwf_fast)),
+		aui.row(_('TSO queue'), aui.fmtK(c.rx_oq5)),
+		aui.row(_('Per-CPU RX'), perCpu.map(function(v) { return aui.fmtK(v); }).join(' · ')),
+		dropRow(_('CPU dropped'), c.rx_cpu_drop),
+		dropRow(_('HW dropped'), c.rx_hwf_drop),
+		dropRow(_('HW fast dropped'), c.rx_hwf_fast_drop),
+		dropRow(_('TSO dropped'), c.rx_oq5_drop)
 	];
-	if ((Number(c.rx_cpu_drop) || 0) > 0) body.push(aui.row(_('CPU dropped'), aui.fmtK(c.rx_cpu_drop), 'ai-err'));
-	if ((Number(c.rx_hwf_drop) || 0) > 0) body.push(aui.row(_('HW dropped'), aui.fmtK(c.rx_hwf_drop), 'ai-err'));
-	// PPE CPU-port selection depends on QDMA and fport. Bank counts belong
-	// in PPE Engines; c.reg alone does not prove a fixed CDM/PPE association.
+	// QDMA0/1 serve LAN/WAN in the Airoha driver. A PPE table is a different
+	// counting domain, so keep bank counters in PPE Engines.
 	return aui.card({
 		name: 'CDM' + c.reg,
-		tag: 'CPU DMA',
+		tag: Number(c.reg) === 1 ? 'LAN' : Number(c.reg) === 2 ? 'WAN' : 'CPU DMA',
 		accent: 'var(--ai-npu)',
 		body: body
 	});
 }
+
+/* PSE port index -> hardware port name (FE_PSE_PORT_* in airoha_eth.h). The
+ * backend stops at index 9 (GDM4): index 10 (CDM5) sits in the same register
+ * window as the drop counters, which are not usable on this silicon. */
+var PSE_PORT_NAMES = ['CDM1', 'GDM1', 'GDM2', 'GDM3', 'PPE1', 'CDM2', 'CDM3', 'CDM4', 'PPE2', 'GDM4'];
 
 function renderPseBufferCard(pse) {
 	pse = pse || {};
@@ -1185,16 +1240,31 @@ function renderPseBufferCard(pse) {
 	var pct = total > 0 ? used / total * 100 : 0;
 	var accent = total <= 0 ? 'var(--ds-border-strong)'
 		: pct >= 80 ? 'var(--ds-error)' : pct >= 50 ? 'var(--ds-warn)' : 'var(--ds-ok)';
-	return aui.card({
-		name: _('PSE shared buffer'),
-		tag: total > 0 ? aui.fmtPct(pct, 1) : '—',
-		accent: accent,
-		body: aui.bar({
+	var body = [
+		aui.bar({
 			pct: pct,
 			accent: accent,
 			title: _('HW Buffer'),
 			right: aui.fmtK(used) + ' / ' + aui.fmtK(total)
 		})
+	];
+	/* Per-port input/output queue occupancy, in frames. Only ports that are
+	 * actually holding something are listed: an idle port is normal, and ten
+	 * always-present zero rows would bury the two that matter. */
+	if (Array.isArray(pse.ports)) {
+		pse.ports.forEach(function(p) {
+			var iq = Number(p && p.iq) || 0, oq = Number(p && p.oq) || 0;
+			if (iq + oq <= 0) return;
+			var name = PSE_PORT_NAMES[Number(p.port)] || ('P' + p.port);
+			body.push(aui.row(name + ' IQ / OQ',
+				'IQ ' + aui.fmtK(iq) + ' · OQ ' + aui.fmtK(oq)));
+		});
+	}
+	return aui.card({
+		name: _('PSE shared buffer'),
+		tag: total > 0 ? aui.fmtPct(pct, 1) : '—',
+		accent: accent,
+		body: body
 	});
 }
 
@@ -1276,9 +1346,6 @@ function renderCryptoStatus(cr) {
 		aui.row(_('Hardware IRQs'), typeof cr.irqs === 'number' ? aui.fmtK(cr.irqs) : '—')
 	];
 	var body = [ E('div', {}, rows) ];
-	if (algos > 0 && cr.algorithms)
-		body.push(E('p', { 'class': 'ai-hint', 'style': 'margin-top:var(--ds-sp-2)' }, cr.algorithms));
-
 	return E('div', { 'style': 'margin-top:var(--ds-sp-4)' }, [
 		head, hint,
 		aui.card({
@@ -1323,6 +1390,13 @@ function renderEngineStatus(st, ppe) {
 		ppeRows.push(aui.row(_('PPE2 table'), ppe2 + ' · BND ' + (Number(ppe.ppe2_bound) || 0)));
 	if (dram > 0)
 		ppeRows.push(aui.row(_('Shared DRAM'), dram + ' · BND ' + (Number(ppe.dram_bound) || 0)));
+	/* Entries whose L2 header is still all-zero. They are reported separately
+	 * because a table filled with them cannot bind to the hardware path, so a
+	 * high count alongside a low Bind rate is the actual explanation. The field
+	 * is only emitted by a backend that can see individual records. */
+	var zeroL2 = Number(ppe.zero_l2) || 0;
+	if (typeof ppe.zero_l2 !== 'undefined' && zeroL2 > 0)
+		ppeRows.push(aui.row(_('Zero-L2'), zeroL2 + ' · BND ' + (Number(ppe.zero_l2_bound) || 0), 'ai-err'));
 	var ppeCard = aui.card({
 		name: 'PPE Engines', tag: 'P4 + P8', accent: 'var(--ai-npu)',
 		body: ppeRows
@@ -1475,9 +1549,11 @@ return view.extend({
 		var ppeRequestSequence = 0;
 		var latestPpeRequest = 0;
 		// Last per-engine PPE slice seen in a real (non-deferred) PPE round. The
-		// CDM cards show it, but the PPE probe is on a 20 s cadence while the
-		// CDM block re-renders every 5 s, so it has to outlive a single reply.
-		var latestPpeSplit = (typeof ppe.ppe1 !== 'undefined') ? ppe : null;
+		// CDM cards and the PPE engine card show it, but the PPE probe is on a
+		// 20 s cadence while the rest of the page re-renders every 5 s, so it has
+		// to outlive a single reply. zero_l2 rides on the same parse, and on a
+		// backend that predates the split it is the only one of the two present.
+		var latestPpeSplit = (typeof ppe.ppe1 !== 'undefined' || typeof ppe.zero_l2 !== 'undefined') ? ppe : null;
 		var updatedEl = null;
 		// Last cpufreq reason, so the poll can rebuild the control container when
 		// the board's cpufreq availability changes. Null forces one rebuild once
@@ -1585,7 +1661,7 @@ return view.extend({
 			if (deferPpe !== true && requestSequence > latestPpeRequest) {
 				latestPpeRequest = requestSequence;
 				latestPpeEntries = Array.isArray(ppe.entries) ? ppe.entries : [];
-				latestPpeSplit = (typeof ppe.ppe1 !== 'undefined') ? ppe : null;
+				latestPpeSplit = (typeof ppe.ppe1 !== 'undefined' || typeof ppe.zero_l2 !== 'undefined') ? ppe : null;
 				updatePpeTable(latestPpeEntries, ppe);
 			}
 			updateSummary(st, ti);
@@ -1646,7 +1722,7 @@ return view.extend({
 			}
 
 			var engineEl = document.getElementById('engine-status');
-			if (engineEl) engineEl.replaceChildren(renderEngineStatus(st, ppe));
+			if (engineEl) engineEl.replaceChildren(renderEngineStatus(st, latestPpeSplit || ppe));
 			var feEl = document.getElementById('frame-engine');
 			if (feEl) feEl.replaceChildren(renderFrameEngine(fe, topo, latestPpeSplit));
 			var epEl = document.getElementById('ethernet-ports');

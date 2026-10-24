@@ -816,6 +816,36 @@ msgstr ""
 msgid "HW dropped"
 msgstr ""
 
+msgid "HW fast path"
+msgstr ""
+
+msgid "HW fast dropped"
+msgstr ""
+
+msgid "TSO queue"
+msgstr ""
+
+msgid "TSO dropped"
+msgstr ""
+
+msgid "Per-CPU RX"
+msgstr ""
+
+msgid "RX resource dropped"
+msgstr ""
+
+msgid "RX overflow dropped"
+msgstr ""
+
+msgid "RX error dropped"
+msgstr ""
+
+msgid "Since boot"
+msgstr ""
+
+msgid "Zero-L2"
+msgstr ""
+
 msgid "Frame Engine counters are unavailable on this build."
 msgstr ""
 
@@ -831,7 +861,7 @@ msgstr ""
 msgid "Link down"
 msgstr ""
 
-msgid "Total received"
+msgid "Transmitted"
 msgstr ""
 
 msgid "CPU Usage History"
