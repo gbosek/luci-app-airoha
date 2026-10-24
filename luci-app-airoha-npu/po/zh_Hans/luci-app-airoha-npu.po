@@ -817,6 +817,36 @@ msgstr "CPU 丢弃"
 msgid "HW dropped"
 msgstr "硬件丢弃"
 
+msgid "HW fast path"
+msgstr "硬件快速路径"
+
+msgid "HW fast dropped"
+msgstr "硬件快速路径丢弃"
+
+msgid "TSO queue"
+msgstr "TSO 队列"
+
+msgid "TSO dropped"
+msgstr "TSO 丢弃"
+
+msgid "Per-CPU RX"
+msgstr "各 CPU 接收"
+
+msgid "RX resource dropped"
+msgstr "接收资源不足丢弃"
+
+msgid "RX overflow dropped"
+msgstr "接收溢出丢弃"
+
+msgid "RX error dropped"
+msgstr "接收错误丢弃"
+
+msgid "Since boot"
+msgstr "自启动累计"
+
+msgid "Zero-L2"
+msgstr "空 L2 表项"
+
 msgid "Frame Engine counters are unavailable on this build."
 msgstr "此构建无法读取帧引擎计数器。"
 

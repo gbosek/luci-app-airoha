@@ -47,7 +47,8 @@ function bucket(idx, state) {
 	}
 }
 BEGIN { total = shown = n4 = n6 = l2b = bnd = unb = fin = 0
-	ppe1 = ppe2 = dram = ppe1_bnd = ppe2_bnd = dram_bnd = 0 }
+	ppe1 = ppe2 = dram = ppe1_bnd = ppe2_bnd = dram_bnd = 0
+	zero_l2 = zero_l2_bnd = 0; have_records = 0 }
 # Some kernel versions expose only the bound count in ppe/bind.
 NF == 1 && $1 ~ /^[0-9]+$/ && (state_filter == "" || state_filter == "BND") {
 	total += $1
@@ -69,6 +70,15 @@ $1 ~ /^[0-9a-fA-F]+$/ && $2 ~ /^(BND|UNB|FIN|INV)$/ {
 	if (type == "IPv6") n6++
 	if (type == "L2B") l2b++
 	if ((type == "IPv4" || type == "IPv6") && $4 ~ /^[35]T$/) proto = $4
+	# An all-zero L2 header is what the kernel prints for a flow whose MACs and
+	# ethertype were never filled in (%pM renders 00:00:00:00:00:00, %04x
+	# renders 0000). Counting those separately tells "table occupied by entries
+	# that cannot bind" apart from ordinary UNB/INV churn.
+	if (field("eth") == "00:00:00:00:00:00->00:00:00:00:00:00" && field("etype") == "0000") {
+		zero_l2++
+		if ($2 == "BND") zero_l2_bnd++
+	}
+	have_records = 1
 	if (shown >= limit) next
 	shown++
 	entry[shown] = sprintf("{\"index\":%s,\"state\":%s,\"type\":%s,\"proto\":%s,\"orig\":%s,\"new_flow\":%s,\"eth\":%s,\"etype\":%s,\"vlan\":%s,\"packets\":%s,\"bytes\":%s}",
@@ -84,6 +94,10 @@ END {
 	if (ppe1 + ppe2 + dram > 0)
 		printf ",\"ppe1\":%d,\"ppe2\":%d,\"dram\":%d,\"ppe1_bound\":%d,\"ppe2_bound\":%d,\"dram_bound\":%d",
 			ppe1, ppe2, dram, ppe1_bnd, ppe2_bnd, dram_bnd
+	# Same rule as the per-engine split: the legacy one-number format has no
+	# records to inspect, so omit the field instead of reporting a false 0.
+	if (have_records)
+		printf ",\"zero_l2\":%d,\"zero_l2_bound\":%d", zero_l2, zero_l2_bnd
 	printf ",\"truncated\":%s,\"entries\":[", (total > shown ? "true" : "false")
 	for (i = 1; i <= shown; i++) {
 		if (i > 1) printf ","
