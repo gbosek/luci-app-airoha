@@ -1369,15 +1369,42 @@ function renderCryptoStatus(cr) {
 }
 
 /* ── NPU and PPE engine status ── */
+/* Compact label for the NPU reserved-memory carveout: the single region on
+ * every board seen so far is the firmware binary, so name it; a multi-region
+ * DTS collapses to a count plus the total size. Sizes arrive as the strings
+ * parsed out of dmesg ("10240 KiB"). */
+function npuMemLabel(regions) {
+	var list = Array.isArray(regions) ? regions : [];
+	if (!list.length) return '—';
+	if (list.length === 1 && list[0] && list[0].size)
+		return (list[0].name ? list[0].name + ' · ' : '') + list[0].size;
+	var total = 0;
+	list.forEach(function(r) {
+		var m = /^([\d.]+)\s*(KiB|MiB|GiB)/.exec((r && r.size) || '');
+		if (!m) return;
+		var v = parseFloat(m[1]);
+		total += m[2] === 'KiB' ? v * 1024 : m[2] === 'MiB' ? v * 1048576 : v * 1073741824;
+	});
+	return total ? list.length + ' · ' + Math.round(total / 1048576) + ' MiB' : '—';
+}
+
 function renderEngineStatus(st, ppe) {
 	st = st || {}; ppe = ppe || {};
 	var npuActive = isEnabled(st.npu_loaded);
 	var npuCard = aui.card({
-		name: 'NPU', tag: npuActive ? 'ACTIVE' : 'OFF',
-		accent: npuActive ? 'var(--ai-npu)' : 'var(--ds-border-strong)',
+		name: 'NPU', accent: npuActive ? 'var(--ai-npu)' : 'var(--ds-border-strong)',
 		body: [
-			aui.row(_('Firmware / Clock / Cores'), (st.npu_version || 'Unknown') + ' · ' + (st.npu_clock ? Math.round(st.npu_clock / 1000000) + ' MHz' : 'N/A')),
-			aui.row('RISC-V', (st.npu_cores || 0) + ' ' + _('cores') + ' · PCIe RAM')
+			// Run state as a pill in a Status row, the same way the Crypto Engine
+			// card reports it, instead of a plain "ACTIVE" header tag.
+			aui.row(_('Status'), npuActive ? aui.pill(_('Activated'), 'ok') : aui.pill(_('Driver unavailable'), 'warn')),
+			// One fact per row, matching the single-line rows of PPE Engines.
+			aui.row(_('Firmware'), st.npu_version || 'Unknown'),
+			aui.row(_('Clock'), st.npu_clock ? Math.round(st.npu_clock / 1000000) + ' MHz' : 'N/A'),
+			aui.row(_('Cores'), (st.npu_cores || 0) + ' ' + _('cores') + ' · PCIe RAM'),
+			// Device node and the firmware carveout are the only two facts the
+			// driver publishes that the rows above do not already carry.
+			aui.row(_('Device'), st.npu_device || '—'),
+			aui.row(_('Reserved Memory'), npuMemLabel(st.memory_regions))
 		]
 	});
 
