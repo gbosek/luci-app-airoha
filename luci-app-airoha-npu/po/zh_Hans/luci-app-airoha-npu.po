@@ -787,8 +787,8 @@ msgstr "此处开关用于应用本设备的硬件卸载设置。"
 msgid "Frame Engine"
 msgstr "帧引擎"
 
-msgid "Register-level counters for the GDM data MACs and CDM DMA engines. The PPE table line on each CDM card is the flow-table slice owned by that engine."
-msgstr "GDM 数据 MAC 与 CDM DMA 引擎的寄存器级计数。每张 CDM 卡片上的 PPE 表区行是该引擎所辖的流表分片。"
+msgid "Register-level counters for the GDM data MACs and CDM DMA engines."
+msgstr "直接读取帧引擎寄存器，显示 GDM 数据 MAC 与 CDM DMA 引擎计数。"
 
 msgid "GDM Ports"
 msgstr "GDM 端口"

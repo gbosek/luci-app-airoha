@@ -786,7 +786,7 @@ msgstr ""
 msgid "Frame Engine"
 msgstr ""
 
-msgid "Register-level counters for the GDM data MACs and CDM DMA engines. The PPE table line on each CDM card is the flow-table slice owned by that engine."
+msgid "Register-level counters for the GDM data MACs and CDM DMA engines."
 msgstr ""
 
 msgid "GDM Ports"

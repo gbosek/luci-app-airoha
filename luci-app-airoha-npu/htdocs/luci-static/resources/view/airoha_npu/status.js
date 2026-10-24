@@ -1140,7 +1140,7 @@ function renderGdmCard(g, topo) {
 	});
 }
 
-function renderCdmCard(c, split) {
+function renderCdmCard(c) {
 	c = c || {};
 	var cpu = Number(c.rx_cpu) || 0, hwf = Number(c.rx_hwf) || 0;
 	var total = cpu + hwf;
@@ -1168,15 +1168,8 @@ function renderCdmCard(c, split) {
 	];
 	if ((Number(c.rx_cpu_drop) || 0) > 0) body.push(aui.row(_('CPU dropped'), aui.fmtK(c.rx_cpu_drop), 'ai-err'));
 	if ((Number(c.rx_hwf_drop) || 0) > 0) body.push(aui.row(_('HW dropped'), aui.fmtK(c.rx_hwf_drop), 'ai-err'));
-	// CDM1 is the CPU port of PPE engine 1 and CDM2 of engine 2, so each card
-	// also carries the flow-table slice counted by that engine. The split comes
-	// from the PPE probe (20 s cadence) and is undefined until it lands, and on
-	// a single-PPE SoC there is no CDM2 slice at all.
-	split = split || {};
-	var eng = Number(c.reg) === 2 ? 'ppe2' : Number(c.reg) === 1 ? 'ppe1' : '';
-	if (eng && typeof split[eng] !== 'undefined')
-		body.push(aui.row(eng === 'ppe2' ? _('PPE2 table') : _('PPE1 table'),
-			aui.fmtK(split[eng]) + ' · BND ' + aui.fmtK(split[eng + '_bound'] || 0)));
+	// PPE CPU-port selection depends on QDMA and fport. Bank counts belong
+	// in PPE Engines; c.reg alone does not prove a fixed CDM/PPE association.
 	return aui.card({
 		name: 'CDM' + c.reg,
 		tag: 'CPU DMA',
@@ -1219,7 +1212,7 @@ function renderFrameEngine(fe, topo, split) {
 	fe = fe || {};
 	var head = E('div', { 'class': 'ai-subhead', 'style': 'margin-top:0' }, _('Frame Engine'));
 	var hint = E('p', { 'class': 'ai-hint' },
-		_('Register-level counters for the GDM data MACs and CDM DMA engines. The PPE table line on each CDM card is the flow-table slice owned by that engine.'));
+		_('Register-level counters for the GDM data MACs and CDM DMA engines.'));
 	if (fe.available === false) {
 		return E('div', { 'style': 'margin-top:var(--ds-sp-4)' }, [
 			head, hint, aui.empty(frameEngineReason(fe))
@@ -1243,7 +1236,7 @@ function renderFrameEngine(fe, topo, split) {
 	if (cdm.length) {
 		blocks.push(E('div', { 'class': 'ai-subhead' }, _('CDM Engines')));
 		blocks.push(E('div', { 'class': 'ai-grid ai-grid--3' }, cdm.map(function(c) {
-			return renderCdmCard(c, split);
+			return renderCdmCard(c);
 		})));
 	}
 	return E('div', { 'style': 'margin-top:var(--ds-sp-4)' }, blocks);
