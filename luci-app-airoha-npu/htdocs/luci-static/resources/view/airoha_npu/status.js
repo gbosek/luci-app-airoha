@@ -1345,9 +1345,6 @@ function renderCryptoStatus(cr) {
 		aui.row(_('Hardware IRQs'), typeof cr.irqs === 'number' ? aui.fmtK(cr.irqs) : '—')
 	];
 	var body = [ E('div', {}, rows) ];
-	if (algos > 0 && cr.algorithms)
-		body.push(E('p', { 'class': 'ai-hint', 'style': 'margin-top:var(--ds-sp-2)' }, cr.algorithms));
-
 	return E('div', { 'style': 'margin-top:var(--ds-sp-4)' }, [
 		head, hint,
 		aui.card({

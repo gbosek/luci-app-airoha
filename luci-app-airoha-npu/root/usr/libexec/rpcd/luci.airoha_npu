@@ -730,7 +730,7 @@ get_frame_engine() {
 # and the engine list cannot change before a reboot, so its answer is cached
 # for a minute to keep repeated page loads cheap.
 get_crypto_info() {
-	local present=0 bound=0 algos=0 refs=0 algolist="" chardev=0 openssl=0 engine="" irqs="null"
+	local present=0 bound=0 algos=0 refs=0 algostat="" chardev=0 openssl=0 engine="" irqs="null"
 	local dir now stamp saved age cache="/tmp/luci-airoha-npu.crypto.cache"
 
 	[ -d /sys/module/crypto_hw_eip93 ] && present=1
@@ -748,6 +748,12 @@ get_crypto_info() {
 	# accepts "safexcel" because the compatible string is
 	# inside-secure,safexcel-eip93ies and the driver name varies by kernel.
 	#
+	# Only the counts are published. The full list is the driver's registered
+	# algorithm set: it cannot change before a reboot, it says nothing about
+	# which of them are in use, and 32 names in one line is unreadable on a
+	# page that redraws every 5 s - the count plus the refcnt below carry the
+	# same information.
+	#
 	# refcnt is the number of live tfm users of that algorithm, and it is the
 	# only built-in counter this driver exposes (there is no debugfs node on the
 	# vendor kernel): summing it over the EIP93 blocks shows how many sessions
@@ -756,7 +762,7 @@ get_crypto_info() {
 	# on every name line so a reordered or extra field can never leak a count
 	# from another block.
 	if [ -r /proc/crypto ]; then
-		algolist=$(awk '
+		algostat=$(awk '
 			/^name[ \t]*:/ {
 				name = $0
 				sub(/^name[ \t]*:[ \t]*/, "", name)
@@ -768,7 +774,7 @@ get_crypto_info() {
 					matched = 1
 					if (name != "" && !(name in seen)) {
 						seen[name] = 1
-						list = list (n++ ? ", " : "") name
+						n++
 					}
 				}
 			}
@@ -780,12 +786,10 @@ get_crypto_info() {
 					if (value ~ /^[0-9]+$/) refs += value
 				}
 			}
-			END { printf "%d|%d|%s", n + 0, refs + 0, list }
+			END { printf "%d|%d", n + 0, refs + 0 }
 		' /proc/crypto 2>/dev/null)
-		algos="${algolist%%|*}"
-		algolist="${algolist#*|}"
-		refs="${algolist%%|*}"
-		algolist="${algolist#*|}"
+		algos="${algostat%%|*}"
+		refs="${algostat#*|}"
 		case "$algos" in ''|*[!0-9]*) algos=0 ;; esac
 		case "$refs" in ''|*[!0-9]*) refs=0 ;; esac
 	fi
@@ -827,8 +831,8 @@ get_crypto_info() {
 		fi
 	fi
 
-	printf '{"available":true,"present":%d,"bound":%d,"algos":%d,"refcnt":%d,"algorithms":"%s","devcrypto":%d,"openssl":%d,"engine":%s,"irqs":%s}' \
-		"$present" "$bound" "$algos" "$refs" "$(_json_escape "$algolist")" \
+	printf '{"available":true,"present":%d,"bound":%d,"algos":%d,"refcnt":%d,"devcrypto":%d,"openssl":%d,"engine":%s,"irqs":%s}' \
+		"$present" "$bound" "$algos" "$refs" \
 		"$chardev" "$openssl" "${engine:-null}" "$irqs"
 }
 
