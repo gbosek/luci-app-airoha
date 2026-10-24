@@ -237,7 +237,13 @@ msgstr ""
 msgid "Fair"
 msgstr ""
 
-msgid "Firmware / Clock / Cores"
+msgid "Firmware"
+msgstr ""
+
+msgid "Clock"
+msgstr ""
+
+msgid "Cores"
 msgstr ""
 
 msgid "Flow Offload"

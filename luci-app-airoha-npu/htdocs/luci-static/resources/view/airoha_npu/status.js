@@ -360,6 +360,150 @@ function svgEl(tag, attrs, children) {
 	return el;
 }
 
+/* ── Chart hover readout ──
+ * Both history charts are plain SVG rebuilt on every poll, so the hover layer
+ * is rebuilt with them: a dashed crosshair, one dot per series, and an HTML
+ * readout. The readout is HTML rather than SVG text because its size is not
+ * known until it is rendered - placing an SVG text box would need a measuring
+ * pass on every mousemove. Coordinates go through getScreenCTM() when the
+ * browser supports it, with a viewBox fallback for engines that do not. */
+function fmtSampleClock(ms) {
+	var d = new Date(ms);
+	function p(n) { return n < 10 ? '0' + n : String(n); }
+	return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+function chartPointer(svg, evt) {
+	try {
+		if (typeof svg.createSVGPoint === 'function' && svg.getScreenCTM) {
+			var m = svg.getScreenCTM();
+			if (m) {
+				var pt = svg.createSVGPoint();
+				pt.x = evt.clientX; pt.y = evt.clientY;
+				return pt.matrixTransform(m.inverse());
+			}
+		}
+	} catch (err) {
+		// Fall through to the viewBox mapping below.
+	}
+	var rect = svg.getBoundingClientRect();
+	var vb = String(svg.getAttribute('viewBox') || '').split(/\s+/).map(Number);
+	if (!rect.width || vb.length !== 4 || !isFinite(vb[2]) || !isFinite(vb[3])) return null;
+	return {
+		x: (evt.clientX - rect.left) / rect.width * vb[2],
+		y: (evt.clientY - rect.top) / Math.max(1, rect.height) * vb[3]
+	};
+}
+
+function chartNearest(xs, x) {
+	var best = 0, bestD = Infinity;
+	for (var i = 0; i < xs.length; i++) {
+		var d = Math.abs(xs[i] - x);
+		if (d < bestD) { bestD = d; best = i; }
+	}
+	return best;
+}
+
+function chartTipNode() {
+	return E('div', {
+		'style': 'position:absolute;display:none;z-index:3;pointer-events:none;min-width:6.5em;'
+			+ 'padding:.3em .5em;border:1px solid var(--ds-border,#d1d9e0);border-radius:6px;'
+			+ 'background:var(--ds-surface,#fff);color:var(--ds-text,#1f2328);'
+			+ 'box-shadow:0 2px 8px rgba(15,23,42,.18);font-size:11px;line-height:1.5;'
+			+ 'font-variant-numeric:tabular-nums;text-align:left'
+	});
+}
+
+function chartPlaceTip(tip, wrap, evt) {
+	var wr = wrap.getBoundingClientRect();
+	var px = evt.clientX - wr.left, py = evt.clientY - wr.top;
+	tip.style.display = 'block';
+	var tw = tip.offsetWidth, th = tip.offsetHeight;
+	var left = Math.min(Math.max(0, px - tw / 2), Math.max(0, wr.width - tw));
+	var top = py - th - 10;
+	if (top < 0) top = py + 12;
+	tip.style.left = left + 'px';
+	tip.style.top = top + 'px';
+}
+
+/* `o` = { svg, wrap, xs, guideTop, guideBottom, dotColors,
+ *         time(i) -> epoch ms, points(i) -> [{x,y}|null] per dot, rows(i) }.
+ * points() and rows() are called per mousemove so the readout always reflects
+ * the sample the crosshair currently sits on. */
+function attachChartHover(o) {
+	var svg = o.svg, wrap = o.wrap, xs = o.xs || [];
+	var tip = chartTipNode();
+	wrap.appendChild(tip);
+
+	var guide = svgEl('line', {
+		'x1': 0, 'x2': 0, 'y1': o.guideTop, 'y2': o.guideBottom,
+		'style': 'stroke:var(--ds-text-muted,#656d76);stroke-width:1;stroke-dasharray:3 3;pointer-events:none',
+		'visibility': 'hidden'
+	});
+	svg.appendChild(guide);
+
+	var dots = (o.dotColors || []).map(function(color) {
+		var dot = svgEl('circle', {
+			'cx': 0, 'cy': 0, 'r': '3.5',
+			'style': 'fill:' + color + ';stroke:var(--ds-surface,#fff);stroke-width:1.5;pointer-events:none',
+			'visibility': 'hidden'
+		});
+		svg.appendChild(dot);
+		return dot;
+	});
+
+	function hide() {
+		tip.style.display = 'none';
+		guide.setAttribute('visibility', 'hidden');
+		for (var i = 0; i < dots.length; i++) dots[i].setAttribute('visibility', 'hidden');
+	}
+
+	function show(evt) {
+		var p = chartPointer(svg, evt);
+		if (!p || !xs.length) return;
+		var i = chartNearest(xs, p.x);
+		guide.setAttribute('x1', xs[i].toFixed(1));
+		guide.setAttribute('x2', xs[i].toFixed(1));
+		guide.setAttribute('visibility', 'visible');
+
+		var points = o.points(i) || [];
+		for (var d = 0; d < dots.length; d++) {
+			var point = points[d];
+			if (point) {
+				dots[d].setAttribute('cx', point.x.toFixed(1));
+				dots[d].setAttribute('cy', point.y.toFixed(1));
+				dots[d].setAttribute('visibility', 'visible');
+			} else {
+				dots[d].setAttribute('visibility', 'hidden');
+			}
+		}
+
+		tip.innerHTML = '';
+		tip.appendChild(E('div', {
+			'style': 'color:var(--ds-text-muted,#656d76);font-weight:650;margin-bottom:2px'
+		}, fmtSampleClock(o.time(i))));
+		(o.rows(i) || []).forEach(function(row) {
+			tip.appendChild(E('div', {
+				'style': 'display:flex;align-items:center;gap:.4em;white-space:nowrap'
+			}, [
+				row.color ? E('span', {
+					'style': 'width:.9em;height:2px;border-radius:2px;background:' + row.color + ';flex:0 0 auto'
+				}) : null,
+				row.label ? E('span', {
+					'style': 'color:var(--ds-text-muted,#656d76);font-family:var(--ds-mono,monospace)'
+				}, row.label) : null,
+				E('span', {
+					'style': 'margin-left:auto;padding-left:.6em;font-family:var(--ds-mono,monospace);font-weight:700'
+				}, row.value)
+			]));
+		});
+		chartPlaceTip(tip, wrap, evt);
+	}
+
+	svg.addEventListener('mousemove', show);
+	svg.addEventListener('mouseleave', hide);
+}
+
 function renderFreqChart(min, max, containerW) {
 	var lo = (min > 0) ? min : CPU_MIN_FREQ_KHZ;
 	var hi = (max > lo) ? max : CPU_MAX_FREQ_KHZ;
@@ -381,6 +525,7 @@ function renderFreqChart(min, max, containerW) {
 		xs.push(x); ys.push(y);
 		pts.push(x.toFixed(1) + ',' + y.toFixed(1));
 	}
+	var hoverXs = xs.slice(), hoverYs = ys.slice();
 	if (n === 1) { xs.unshift(padX); ys.unshift(ys[0]); pts.unshift(padX + ',' + ys[0].toFixed(1)); }
 	/* Close the area fill at the first/last data x, not the chart edges,
 	 * otherwise the polygon diagonal streaks across empty space. */
@@ -391,10 +536,10 @@ function renderFreqChart(min, max, containerW) {
 	var gridStyle = 'stroke:var(--ds-border);stroke-width:1;stroke-dasharray:3 3';
 	var lblStyle = 'fill:var(--ds-text-muted);font-size:9px;font-family:var(--ds-mono)';
 	var last = pts[pts.length - 1].split(',');
-	return svgEl('svg', {
+	var svg = svgEl('svg', {
 		'viewBox': '0 0 ' + W + ' ' + H,
 		'width': '100%', 'height': H,
-		'style': 'display:block',
+		'style': 'display:block;cursor:crosshair',
 		'role': 'img', 'aria-label': _('Frequency History')
 	}, [
 		svgEl('line', { 'x1': padX, 'y1': padT, 'x2': W - padX, 'y2': padT, 'style': gridStyle }),
@@ -408,6 +553,16 @@ function renderFreqChart(min, max, containerW) {
 		}),
 		svgEl('circle', { 'cx': last[0], 'cy': last[1], 'r': '3', 'style': 'fill:var(--ds-ok)' })
 	]);
+	var wrap = E('div', { 'style': 'position:relative' }, [ svg ]);
+	attachChartHover({
+		svg: svg, wrap: wrap, xs: hoverXs,
+		guideTop: padT, guideBottom: padT + innerH,
+		dotColors: [ 'var(--ds-ok)' ],
+		time: function(i) { return freqHistory[i].t; },
+		points: function(i) { return [ { x: hoverXs[i], y: hoverYs[i] } ]; },
+		rows: function(i) { return [ { value: aui.fmtFreq(freqHistory[i].v), color: 'var(--ds-ok)' } ]; }
+	});
+	return wrap;
 }
 
 /* ── CPU usage history chart ──
@@ -685,12 +840,47 @@ function renderLoadChart(containerW) {
 			}));
 	}
 
-	return svgEl('svg', {
+	var svg = svgEl('svg', {
 		'viewBox': '0 0 ' + W + ' ' + H,
 		'width': '100%', 'height': H,
-		'style': 'display:block',
+		'style': 'display:block;cursor:crosshair',
 		'role': 'img', 'aria-label': _('CPU Usage History')
 	}, nodes);
+
+	var hoverXs = [];
+	for (var i = 0; i < n; i++) hoverXs.push(xOf(i));
+
+	var dotColors = [];
+	for (var c = 0; c < cores; c++) dotColors.push(coreColor(c));
+
+	var wrap = E('div', { 'style': 'position:relative' }, [ svg ]);
+	attachChartHover({
+		svg: svg, wrap: wrap, xs: hoverXs,
+		guideTop: padT, guideBottom: padT + innerH,
+		dotColors: dotColors,
+		time: function(i) { return loadHistory[i].t; },
+		points: function(i) {
+			var out = [];
+			for (var c = 0; c < cores; c++) {
+				var v = loadHistory[i].u[c];
+				out.push(isPercent(v) ? { x: hoverXs[i], y: yOf(v) } : null);
+			}
+			return out;
+		},
+		rows: function(i) {
+			var out = [];
+			for (var c = 0; c < cores; c++) {
+				var v = loadHistory[i].u[c];
+				out.push({
+					label: 'cpu' + c,
+					value: isPercent(v) ? aui.fmtPct(v) : '—',
+					color: coreColor(c)
+				});
+			}
+			return out;
+		}
+	});
+	return wrap;
 }
 
 function renderLoadCard() {
@@ -1357,15 +1547,42 @@ function renderCryptoStatus(cr) {
 }
 
 /* ── NPU and PPE engine status ── */
+/* Compact label for the NPU reserved-memory carveout: the single region on
+ * every board seen so far is the firmware binary, so name it; a multi-region
+ * DTS collapses to a count plus the total size. Sizes arrive as the strings
+ * parsed out of dmesg ("10240 KiB"). */
+function npuMemLabel(regions) {
+	var list = Array.isArray(regions) ? regions : [];
+	if (!list.length) return '—';
+	if (list.length === 1 && list[0] && list[0].size)
+		return (list[0].name ? list[0].name + ' · ' : '') + list[0].size;
+	var total = 0;
+	list.forEach(function(r) {
+		var m = /^([\d.]+)\s*(KiB|MiB|GiB)/.exec((r && r.size) || '');
+		if (!m) return;
+		var v = parseFloat(m[1]);
+		total += m[2] === 'KiB' ? v * 1024 : m[2] === 'MiB' ? v * 1048576 : v * 1073741824;
+	});
+	return total ? list.length + ' · ' + Math.round(total / 1048576) + ' MiB' : '—';
+}
+
 function renderEngineStatus(st, ppe) {
 	st = st || {}; ppe = ppe || {};
 	var npuActive = isEnabled(st.npu_loaded);
 	var npuCard = aui.card({
-		name: 'NPU', tag: npuActive ? 'ACTIVE' : 'OFF',
-		accent: npuActive ? 'var(--ai-npu)' : 'var(--ds-border-strong)',
+		name: 'NPU', accent: npuActive ? 'var(--ai-npu)' : 'var(--ds-border-strong)',
 		body: [
-			aui.row(_('Firmware / Clock / Cores'), (st.npu_version || 'Unknown') + ' · ' + (st.npu_clock ? Math.round(st.npu_clock / 1000000) + ' MHz' : 'N/A')),
-			aui.row('RISC-V', (st.npu_cores || 0) + ' ' + _('cores') + ' · PCIe RAM')
+			// Run state as a pill in a Status row, the same way the Crypto Engine
+			// card reports it, instead of a plain "ACTIVE" header tag.
+			aui.row(_('Status'), npuActive ? aui.pill(_('Activated'), 'ok') : aui.pill(_('Driver unavailable'), 'warn')),
+			// One fact per row, matching the single-line rows of PPE Engines.
+			aui.row(_('Firmware'), st.npu_version || 'Unknown'),
+			aui.row(_('Clock'), st.npu_clock ? Math.round(st.npu_clock / 1000000) + ' MHz' : 'N/A'),
+			aui.row(_('Cores'), (st.npu_cores || 0) + ' ' + _('cores') + ' · PCIe RAM'),
+			// Device node and the firmware carveout are the only two facts the
+			// driver publishes that the rows above do not already carry.
+			aui.row(_('Device'), st.npu_device || '—'),
+			aui.row(_('Reserved Memory'), npuMemLabel(st.memory_regions))
 		]
 	});
 
@@ -1395,8 +1612,16 @@ function renderEngineStatus(st, ppe) {
 	 * high count alongside a low Bind rate is the actual explanation. The field
 	 * is only emitted by a backend that can see individual records. */
 	var zeroL2 = Number(ppe.zero_l2) || 0;
-	if (typeof ppe.zero_l2 !== 'undefined' && zeroL2 > 0)
-		ppeRows.push(aui.row(_('Zero-L2'), zeroL2 + ' · BND ' + (Number(ppe.zero_l2_bound) || 0), 'ai-err'));
+	if (typeof ppe.zero_l2 !== 'undefined' && zeroL2 > 0) {
+		// Red only once these entries dominate the table: a few all-zero L2
+		// headers are ordinary churn, but past half the table the entries that
+		// could bind have been crowded out, which is the fault worth flagging.
+		var tableTotal = Number(ppe.total) || Number(st.offload_total) || 0;
+		var zeroL2Share = tableTotal > 0 ? zeroL2 / tableTotal : 0;
+		ppeRows.push(aui.row(_('Zero-L2'),
+			zeroL2 + ' · BND ' + (Number(ppe.zero_l2_bound) || 0),
+			zeroL2Share >= 0.5 ? 'ai-err' : ''));
+	}
 	var ppeCard = aui.card({
 		name: 'PPE Engines', tag: 'P4 + P8', accent: 'var(--ai-npu)',
 		body: ppeRows

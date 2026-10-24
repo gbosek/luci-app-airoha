@@ -238,8 +238,11 @@ msgstr "设置 Ping 目标失败"
 msgid "Fair"
 msgstr "一般"
 
-msgid "Firmware / Clock / Cores"
-msgstr "固件 / 时钟 / 核心"
+msgid "Firmware"
+msgstr "固件"
+
+msgid "Clock"
+msgstr "时钟"
 
 msgid "Flow Offload"
 msgstr "硬件流量加速"
@@ -669,6 +672,9 @@ msgstr "保守模式"
 
 msgid "cores"
 msgstr "核"
+
+msgid "Cores"
+msgstr "核心"
 
 msgid "flows"
 msgstr "流"
