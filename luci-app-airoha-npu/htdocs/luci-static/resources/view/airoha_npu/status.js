@@ -1659,9 +1659,9 @@ function ppeCountText(entries) {
 	if (ppeCurrentMeta.available === false) return _('PPE table unavailable');
 	var total = ppeCurrentMeta.total === undefined ? entries.length : ppeCurrentMeta.total;
 	var s = total + ' ' + _('flows') + ' · BND ' +
-		(ppeCurrentMeta.bound || 0) + ' / UNB ' + (ppeCurrentMeta.unbound || 0) +
-		' · IPv4 ' + (ppeCurrentMeta.ipv4 || 0) + ' / IPv6 ' + (ppeCurrentMeta.ipv6 || 0) +
-		' / L2B ' + (ppeCurrentMeta.l2b || 0);
+		(ppeCurrentMeta.bound || 0) + '/UNB ' + (ppeCurrentMeta.unbound || 0) +
+		' · IPv4 ' + (ppeCurrentMeta.ipv4 || 0) + '/IPv6 ' + (ppeCurrentMeta.ipv6 || 0) +
+		'/L2B ' + (ppeCurrentMeta.l2b || 0);
 	if (ppeCurrentMeta.truncated) s += ' · ' + _('showing') + ' ' + entries.length + ' / ' + total;
 	return s;
 }

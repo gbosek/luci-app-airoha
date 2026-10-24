@@ -94,6 +94,13 @@ var COMPONENT_CSS = [
 
 	'.ai-pill{display:inline-flex;align-items:center;gap:var(--ds-sp-2);min-height:20px;padding:0 var(--ds-sp-2);border:1px solid var(--ds-border);border-radius:var(--ds-r-pill);background:var(--ds-surface-sunken);font-size:var(--ds-fs-xs);font-weight:650;color:var(--ds-text-muted);white-space:nowrap}',
 	'.ai-pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}',
+	/* A count makes the header a single, never-wrapping row: the pill keeps its
+	 * intrinsic width and the title ellipsises instead of pushing it to a second
+	 * line. Sections without a count keep the wrapping behaviour. */
+	'.ai-section-head--tight{flex-wrap:nowrap}',
+	'.ai-section-head--tight h3{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+	'.ai-section-head--tight .ai-pill{flex:0 0 auto}',
+	'.ai-count{font-family:var(--ds-mono);font-variant-numeric:tabular-nums}',
 	'.ai-pill--ok{color:var(--ds-ok);border-color:var(--ds-ok-line);background:var(--ds-ok-tint)}',
 	'.ai-pill--warn{color:var(--ds-warn);border-color:var(--ds-warn-line);background:var(--ds-warn-tint)}',
 	'.ai-pill--error{color:var(--ds-error);border-color:var(--ds-error-line);background:var(--ds-error-tint)}',
@@ -280,11 +287,13 @@ function section(o) {
 	var attrs = { 'class': 'ai-section' };
 	if (o.id) attrs.id = o.id;
 	if (o.wifiOnly) attrs['data-wifi-only'] = '1';
+	/* The count rides at the far right of the title bar as a capsule rather than
+	 * a second line, so the header stays one row tall. */
 	return E('section', attrs, [
-		E('div', { 'class': 'ai-section-head' }, [
+		E('div', { 'class': 'ai-section-head' + (o.count ? ' ai-section-head--tight' : '') }, [
 			E('h3', {}, o.title),
-			o.count ? E('span', { 'class': 'ai-badge', 'id': o.countId || null }, o.count) : null,
 			E('span', { 'class': 'ai-spacer' }),
+			o.count ? E('span', { 'class': 'ai-pill ai-count', 'id': o.countId || null }, o.count) : null,
 			o.actions || null
 		]),
 		o.hint ? E('p', { 'class': 'ai-hint' }, o.hint) : null,
