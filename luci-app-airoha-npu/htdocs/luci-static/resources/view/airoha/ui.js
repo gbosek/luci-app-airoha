@@ -118,7 +118,12 @@ var COMPONENT_CSS = [
 	'.ai-bar{margin:var(--ds-sp-1) 0 0}',
 	'.ai-bar-head{display:flex;align-items:baseline;justify-content:space-between;gap:var(--ds-sp-2);font-size:var(--ds-fs-xs);color:var(--ds-text-muted)}',
 	'.ai-bar-track{position:relative;height:.5em;margin-top:var(--ds-sp-1);border-radius:var(--ds-r-sm);background:var(--ds-surface-sunken);border:1px solid var(--ds-border);overflow:hidden}',
-	'.ai-bar-fill{height:100%;border-radius:var(--ds-r-sm);background:var(--ai-accent,var(--ds-primary));transition:width .4s}',
+	'.ai-bar-fill{position:absolute;left:0;top:0;bottom:0;border-radius:var(--ds-r-sm);background:var(--ai-accent,var(--ds-primary));background-image:linear-gradient(180deg,rgba(255,255,255,.32),rgba(255,255,255,0) 62%);transition:width .4s}',
+	'.ai-bar-peak{position:absolute;left:0;top:0;bottom:0;background:var(--ai-accent,var(--ds-primary));opacity:.2;pointer-events:none;transition:width .4s}',
+	'.ai-bar--pill .ai-bar-track,.ai-bar--pill .ai-bar-fill,.ai-bar--pill .ai-bar-peak{border-radius:999px}',
+	/* A .5em track is already fully rounded at 4px, so the capsule shape only
+	 * reads once the bar is thick enough to show its straight middle section. */
+	'.ai-bar--pill .ai-bar-track{height:1em}',
 	'.ai-bar--tall .ai-bar-head{font-size:var(--ds-fs-sm)}',
 	'.ai-bar--tall .ai-bar-track{height:3.4em}',
 	'.ai-bar--tall .ai-bar-label{font-size:var(--ds-fs-base)}',
@@ -323,10 +328,14 @@ function bar(o) {
 		'class': 'ai-bar-track', 'role': 'progressbar', 'aria-valuemin': '0',
 		'aria-valuemax': '100', 'aria-valuenow': String(Math.round(pct)), 'aria-label': o.title || ''
 	}, [
+		o.peak != null ? E('div', {
+			'class': 'ai-bar-peak',
+			'style': 'width:' + clampPct(o.peak).toFixed(1) + '%'
+		}) : null,
 		E('div', fillAttrs),
 		o.label ? E('span', { 'class': 'ai-bar-label', 'id': o.labelId || null }, o.label) : null
 	]);
-	var attrs = { 'class': 'ai-bar' + (o.tall ? ' ai-bar--tall' : ''), 'style': '--ai-accent:' + (o.accent || 'var(--ds-primary)') };
+	var attrs = { 'class': 'ai-bar' + (o.tall ? ' ai-bar--tall' : '') + (o.pill ? ' ai-bar--pill' : ''), 'style': '--ai-accent:' + (o.accent || 'var(--ds-primary)') };
 	if (o.id) attrs.id = o.id;
 	return E('div', attrs, [ head, track ]);
 }

@@ -643,8 +643,7 @@ _cdm_json() {
 }
 
 get_frame_engine() {
-	local psb pse_used pse_free pse_ports gdm cdm entry reg base spec
-	local i v iq oq
+	local psb pk pse_used pse_free pse_peak gdm cdm entry reg base spec
 
 	if ! command -v devmem >/dev/null 2>&1; then
 		printf '{"available":false,"reason":"devmem_unavailable"}'
@@ -662,29 +661,20 @@ get_frame_engine() {
 	pse_used=$(( (psb >> 16) & 0x7FFF ))
 	pse_free=$(( psb & 0x7FFF ))
 
-	# PSE per-port queue occupancy: 0x150 + 4i, [30:16] IQ frames, [14:0] OQ.
-	# The vendor only defines P0..P9 (ten ports, fe_reg_en7512.h), even though
-	# PSE_PORT_NUM is 11 on EN7581 - port 10 shares its register window with the
-	# first drop word, so ten is the readable set.
-	#
-	# No PSE drop counter is published here on purpose. The vendor maps
-	# PSE_DROP_CNT(i) to FE+0x178+4i on this chip family, but on both test boards
-	# that word never reads back monotonically (back-to-back reads returned
-	# 0xe0000, 0, 0x80000, 0x40000, ...), so it is not the accumulator its name
-	# suggests; the EN7523 layout at FE+0x120 reads a constant 0 and cannot be
-	# told apart from an unimplemented address without forcing drops. Drop
-	# visibility is taken from the GDM MIB reason counters below instead, which
-	# both the vendor and the mainline kernel document at the same offsets.
-	pse_ports=""
-	i=0
-	while [ "$i" -lt 10 ]; do
-		v=$(_devmem32 "$(printf '0x%x' $(( 0x1fb50150 + i * 4 )))") || break
-		iq=$(( (v >> 16) & 0x7FFF ))
-		oq=$(( v & 0x7FFF ))
-		[ -z "$pse_ports" ] || pse_ports="$pse_ports,"
-		pse_ports="$pse_ports{\"port\":$i,\"iq\":$iq,\"oq\":$oq}"
-		i=$(( i + 1 ))
-	done
+	# FE+0x100 (PSE_BUF_USE_REC) is the hardware's own high-water mark:
+	# [30:16] SHARE_USED_CNT_MAX, [14:0] FQ_CNT_MIN. The shared pool only absorbs
+	# bursts that overrun the per-port reservations, so the instantaneous word at
+	# 0x104 is back to zero within milliseconds; the latched max is what a poll
+	# every few seconds can actually observe. A failed read degrades to 0 rather
+	# than dropping the whole card.
+	pk=$(_devmem32 0x1fb50100) || pk=0
+	pse_peak=$(( (pk >> 16) & 0x7FFF ))
+
+	# Per-port queue occupancy (FE+0x150+4i) is deliberately not exported: every
+	# idle port reports a constant IQ of 2, which reads as a permanent backlog
+	# and says nothing about load. PSE drop visibility also lives elsewhere - the
+	# vendor's PSE_DROP_CNT(i) at FE+0x178+4i never reads back monotonically on
+	# either test board, so drops come from the GDM MIB reason counters below.
 
 	# GDM register blocks, keyed by the device-tree ethernet@N index so the
 	# frontend can label each card from the same topology the port table uses.
@@ -715,8 +705,8 @@ get_frame_engine() {
 		return
 	fi
 
-	printf '{"available":true,"pse":{"used":%s,"free":%s,"ports":[%s]},"gdm":[%s],"cdm":[%s]}' \
-		"$pse_used" "$pse_free" "$pse_ports" "$gdm" "$cdm"
+	printf '{"available":true,"pse":{"used":%s,"free":%s,"peak":%s},"gdm":[%s],"cdm":[%s]}' \
+		"$pse_used" "$pse_free" "$pse_peak" "$gdm" "$cdm"
 }
 
 # NSS (EIP93) crypto engine snapshot.

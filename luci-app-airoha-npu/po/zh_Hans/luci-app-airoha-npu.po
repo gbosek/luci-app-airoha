@@ -484,6 +484,9 @@ msgstr "PSE 共享缓冲"
 msgid "Pause"
 msgstr "暂停"
 
+msgid "Peak"
+msgstr "峰值"
+
 msgid "Per-band airtime efficiency, negotiated and expected rates, failure counts and BND/UNB ownership."
 msgstr "每频段的空口效率、协商与期望速率、失败计数以及 BND/UNB 归属。"
 
@@ -543,6 +546,9 @@ msgstr "保存"
 
 msgid "Sent"
 msgstr "累计发送"
+
+msgid "Share"
+msgstr "占比"
 
 msgid "Shared DRAM"
 msgstr "共享 DRAM"
@@ -633,6 +639,9 @@ msgstr "在线时长"
 
 msgid "Use hardware flow offload in router mode"
 msgstr "路由模式下请改用硬件流量加速"
+
+msgid "Used"
+msgstr "已用"
 
 msgid "VLAN Offload"
 msgstr "VLAN 标签卸载"

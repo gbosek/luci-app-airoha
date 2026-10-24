@@ -486,6 +486,9 @@ msgstr ""
 msgid "Pause"
 msgstr ""
 
+msgid "Peak"
+msgstr ""
+
 msgid "Per-band airtime efficiency, negotiated and expected rates, failure counts and BND/UNB ownership."
 msgstr ""
 
@@ -544,6 +547,9 @@ msgid "Save"
 msgstr ""
 
 msgid "Sent"
+msgstr ""
+
+msgid "Share"
 msgstr ""
 
 msgid "Shared DRAM"
@@ -634,6 +640,9 @@ msgid "Uptime"
 msgstr ""
 
 msgid "Use hardware flow offload in router mode"
+msgstr ""
+
+msgid "Used"
 msgstr ""
 
 msgid "VLAN Offload"

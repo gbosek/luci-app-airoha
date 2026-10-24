@@ -1429,42 +1429,40 @@ function renderCdmCard(c, split) {
 	});
 }
 
-/* PSE port index -> hardware port name (FE_PSE_PORT_* in airoha_eth.h). The
- * backend stops at index 9 (GDM4): index 10 (CDM5) sits in the same register
- * window as the drop counters, which are not usable on this silicon. */
-var PSE_PORT_NAMES = ['CDM1', 'GDM1', 'GDM2', 'GDM3', 'PPE1', 'CDM2', 'CDM3', 'CDM4', 'PPE2', 'GDM4'];
-
 function renderPseBufferCard(pse) {
 	pse = pse || {};
 	var used = Number(pse.used) || 0, free = Number(pse.free) || 0;
 	var total = used + free;
 	var pct = total > 0 ? used / total * 100 : 0;
-	var accent = total <= 0 ? 'var(--ds-border-strong)'
-		: pct >= 80 ? 'var(--ds-error)' : pct >= 50 ? 'var(--ds-warn)' : 'var(--ds-ok)';
-	var body = [
-		aui.bar({
-			pct: pct,
-			accent: accent,
-			title: _('HW Buffer'),
-			right: aui.fmtK(used) + ' / ' + aui.fmtK(total)
-		})
-	];
-	/* Per-port input/output queue occupancy, in frames. Only ports that are
-	 * actually holding something are listed: an idle port is normal, and ten
-	 * always-present zero rows would bury the two that matter. */
-	if (Array.isArray(pse.ports)) {
-		pse.ports.forEach(function(p) {
-			var iq = Number(p && p.iq) || 0, oq = Number(p && p.oq) || 0;
-			if (iq + oq <= 0) return;
-			var name = PSE_PORT_NAMES[Number(p.port)] || ('P' + p.port);
-			body.push(aui.row(name + ' IQ / OQ',
-				'IQ ' + aui.fmtK(iq) + ' · OQ ' + aui.fmtK(oq)));
-		});
-	}
+	/* FE+0x100 carries the hardware's own high-water mark of this pool
+	 * (SHARE_USED_CNT_MAX). A burst is emptied again within milliseconds, so the
+	 * instantaneous word a 5 s poll reads is back to zero by the time the card
+	 * renders; the peak is the only honest answer to "how close has this pool
+	 * come to running out". Undefined on a backend that predates the field. */
+	var peak = (pse.peak === undefined || pse.peak === null) ? null : (Number(pse.peak) || 0);
+	var peakPct = (peak !== null && total > 0) ? Math.min(100, peak / total * 100) : null;
+	/* The bar takes --ds-ok, the same token the Crypto Engine card's "Activated"
+	 * pill paints with, so the fill reads as one accent across the page. No live
+	 * "used / total" readout either: the pool sits at zero almost every sample,
+	 * so the head only names the resource and the row below carries the peak. */
+	var barOpts = {
+		pct: pct,
+		accent: 'var(--ds-ok)',
+		pill: true,
+		title: _('HW Buffer')
+	};
+	if (peakPct !== null) barOpts.peak = peakPct;
+	var body = [ aui.bar(barOpts) ];
+	if (peakPct !== null)
+		body.push(aui.row(_('Peak'),
+			_('Used') + ' ' + aui.fmtK(peak) + ' / ' + _('Total') + ' ' + aui.fmtK(total)
+			+ ' · ' + _('Share') + ' ' + aui.fmtPct(peakPct, 1)));
 	return aui.card({
 		name: _('PSE shared buffer'),
-		tag: total > 0 ? aui.fmtPct(pct, 1) : '—',
-		accent: accent,
+	/* Current usage is near zero almost all the time, so the card tag shows the
+	 * peak share instead - the only number on this card that carries signal. */
+		tag: peakPct !== null ? aui.fmtPct(peakPct, 1) : '',
+		accent: 'var(--ai-npu)',
 		body: body
 	});
 }
