@@ -721,7 +721,14 @@ get_frame_engine() {
 # for a minute to keep repeated page loads cheap.
 get_crypto_info() {
 	local present=0 bound=0 algos=0 refs=0 sess=0 algostat="" chardev=0 openssl=0 engine="" irqs="null"
-	local dir now stamp saved age cache="/tmp/luci-airoha-npu.crypto.cache"
+	local ciphers="" ciphers_json="[]" dump="" irate="null" p_stamp="" p_irq=""
+	local dir now stamp saved saved_ciphers age cache="/tmp/luci-airoha-npu.crypto.cache"
+	local irc="/tmp/luci-airoha-npu.crypto.irq"
+
+	# One clock read serves the engine-probe cache, the interrupt-rate sample
+	# and the "no baseline yet" answer, so it happens before any probe runs.
+	now=$(date +%s 2>/dev/null)
+	case "$now" in ''|*[!0-9]*) now="" ;; esac
 
 	[ -d /sys/module/crypto_hw_eip93 ] && present=1
 	[ -e /dev/crypto ] && chardev=1
@@ -819,32 +826,69 @@ get_crypto_info() {
 
 	if command -v openssl >/dev/null 2>&1; then
 		openssl=1
-		now=$(date +%s 2>/dev/null)
-		case "$now" in ''|*[!0-9]*) now="" ;; esac
 		if [ -n "$now" ] && [ -s "$cache" ]; then
-			{ IFS= read -r stamp; IFS= read -r saved; } <"$cache" 2>/dev/null
+			{ IFS= read -r stamp; IFS= read -r saved; IFS= read -r saved_ciphers; } <"$cache" 2>/dev/null
 			case "$stamp" in ''|*[!0-9]*) stamp="" ;; esac
 			case "$saved" in 0|1) ;; *) saved="" ;; esac
 			if [ -n "$stamp" ] && [ -n "$saved" ] && [ "$now" -ge "$stamp" ] 2>/dev/null; then
 				age=$((now - stamp))
-				[ "$age" -lt 60 ] && engine="$saved"
+				[ "$age" -lt 60 ] && { engine="$saved"; ciphers="$saved_ciphers"; }
 			fi
 		fi
 		if [ -z "$engine" ]; then
-			# Success prints "(devcrypto) ..." followed by " [ available ]";
-			# a missing engine prints an ENGINE_by_id error instead.
-			if openssl engine -t -c devcrypto 2>/dev/null | grep -q '\[ available \]'; then
-				engine=1
-			else
-				engine=0
-			fi
-			[ -n "$now" ] && printf '%s\n%s\n' "$now" "$engine" >"$cache" 2>/dev/null
+			# `-pre DUMP_INFO` is the only probe that answers "which algorithms
+			# can actually be offloaded": it walks every cipher the engine knows,
+			# opens a kernel session for it and prints the backing driver with a
+			# "(hw accelerated)" marker, or `CIOCGSESSION … failed` for the ones
+			# the driver refuses (AES-CBC on this board). Advertised = the marked
+			# ones only; the failed lines are exactly what makes a plain
+			# `openssl enc -aes-128-cbc` silently stay on the CPU. `[ available ]`
+			# in the same output is the engine-level check the card already used.
+			# One fork, cached for a minute: none of it can change before a reboot.
+			dump=$(openssl engine -t -c -vv -pre DUMP_INFO devcrypto 2>&1)
+			case "$dump" in
+			*"[ available ]"*) engine=1 ;;
+			*) engine=0 ;;
+			esac
+			ciphers=$(printf '%s\n' "$dump" \
+				| sed -n 's/^Cipher \(.*\), NID=[0-9]*, .*(hw accelerated).*$/\1/p' \
+				| tr '\n' ',' | sed 's/,$//')
+			[ -n "$now" ] && printf '%s\n%s\n%s\n' "$now" "$engine" "$ciphers" >"$cache" 2>/dev/null
 		fi
 	fi
+	# JSON array of the usable ciphers, empty when the engine is absent. The
+	# names come from the engine itself, so they contain no quotes to escape.
+	if [ -n "$ciphers" ]; then
+		ciphers_json="[\"$(printf '%s' "$ciphers" | sed 's/,/","/g')\"]"
+	fi
 
-	printf '{"available":true,"present":%d,"bound":%d,"algos":%d,"refcnt":%d,"sessions":%d,"devcrypto":%d,"openssl":%d,"engine":%s,"irqs":%s}' \
+	# Interrupt rate. There is no packet or byte counter in the register map to
+	# read (PE_CD_COUNT / PE_RD_COUNT are ring depths, not totals), so the only
+	# runtime quantity this engine exposes is its completion-interrupt total -
+	# and a rate needs two samples. The previous sample is kept next to the
+	# engine cache and rewritten on every call, which lines up with the ~20 s
+	# poll cadence of the card rather than with each 5 s page tick.
+	if [ "$irqs" != "null" ] && [ -n "$now" ]; then
+		if [ -s "$irc" ]; then
+			{ IFS= read -r p_stamp; IFS= read -r p_irq; } <"$irc" 2>/dev/null
+			case "$p_stamp" in ''|*[!0-9]*) p_stamp="" ;; esac
+			case "$p_irq" in ''|*[!0-9]*) p_irq="" ;; esac
+			if [ -n "$p_stamp" ] && [ -n "$p_irq" ] && [ "$now" -gt "$p_stamp" ] 2>/dev/null; then
+				if [ "$irqs" -ge "$p_irq" ] 2>/dev/null; then
+					irate=$(( (irqs - p_irq) / (now - p_stamp) ))
+				else
+					# Counter went backwards: the board rebooted between the two
+					# samples, so the delta is meaningless rather than negative.
+					irate=0
+				fi
+			fi
+		fi
+		printf '%s\n%s\n' "$now" "$irqs" >"$irc" 2>/dev/null
+	fi
+
+	printf '{"available":true,"present":%d,"bound":%d,"algos":%d,"refcnt":%d,"sessions":%d,"devcrypto":%d,"openssl":%d,"engine":%s,"irqs":%s,"irq_rate":%s,"ciphers":%s}' \
 		"$present" "$bound" "$algos" "$refs" "$sess" \
-		"$chardev" "$openssl" "${engine:-null}" "$irqs"
+		"$chardev" "$openssl" "${engine:-null}" "$irqs" "$irate" "$ciphers_json"
 }
 
 # Persist CPU governor / max_freq to UCI so the choice survives a reboot.

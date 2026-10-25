@@ -1517,7 +1517,7 @@ function renderFrameEngine(fe, topo, split) {
 function renderCryptoStatus(cr) {
 	var head = E('div', { 'class': 'ai-subhead', 'style': 'margin-top:0' }, 'EIP93');
 	var hint = E('p', { 'class': 'ai-hint' },
-		_('EIP93 hardware crypto engine plus the user-space /dev/crypto path (cryptodev + OpenSSL devcrypto).'));
+		_('Only the ciphers listed below are offloaded through /dev/crypto; every other algorithm, AES-CBC included, stays in software on the CPU.'));
 	if (!cr) {
 		return E('div', { 'style': 'margin-top:var(--ds-sp-4)' }, [ head, hint, aui.empty(_('No data')) ]);
 	}
@@ -1535,6 +1535,33 @@ function renderCryptoStatus(cr) {
 	var sessions = (cr.sessions === undefined || cr.sessions === null)
 		? Math.max(0, (Number(cr.refcnt) || 0) - algos)
 		: (Number(cr.sessions) || 0);
+
+	/* The 32 algorithms in /proc/crypto are what the driver registers with the
+	 * kernel, not what the user-space path can use: /dev/crypto only reaches the
+	 * subset whose kernel session opens (`CIOCGSESSION`), which is what the
+	 * backend extracts from `openssl engine -pre DUMP_INFO`. Collapse the
+	 * key-size variants (AES-128/192/256-CTR) and rename DES-EDE3 to the 3DES
+	 * everyone knows; the exact names stay available in the tooltip. */
+	var families = [];
+	(cr.ciphers || []).forEach(function(name) {
+		var fam = String(name).replace(/-(128|192|256)-/, '-').replace(/^DES-EDE3-/, '3DES-');
+		if (families.indexOf(fam) < 0) families.push(fam);
+	});
+	/* AES first: the engine reports DES before AES, but AES is what callers
+	 * actually reach for, so the order should not imply relevance. */
+	families.sort(function(a, b) {
+		return (/^AES/.test(a) ? 0 : 1) - (/^AES/.test(b) ? 0 : 1);
+	});
+	var cipherText = families.length ? families.join(' · ') : '—';
+	var cipherCell = families.length
+		? E('span', { 'title': cr.ciphers.join(', ') }, cipherText)
+		: '—';
+
+	/* Interrupt rate: the engine has no packet/byte counter, so the per-second
+	 * completion-interrupt delta is the closest thing to "how busy is it now".
+	 * null means the backend has no previous sample yet (first paint). */
+	var rate = (cr.irq_rate === undefined || cr.irq_rate === null) ? null : Number(cr.irq_rate);
+	var rateText = (rate === null || isNaN(rate)) ? '—' : aui.fmtK(rate) + ' /s';
 	var engineRow;
 	if (Number(cr.openssl) !== 1)
 		engineRow = _('openssl-util not installed');
@@ -1548,17 +1575,19 @@ function renderCryptoStatus(cr) {
 	var rows = [
 		aui.row(_('Status'), active ? aui.pill(_('Activated'), 'ok') : aui.pill(_('Driver unavailable'), 'warn')),
 		aui.row(_('Bound device'), active && Number(cr.bound) === 1 ? '1fb70000.crypto' : _('Not bound')),
-		aui.row(_('Algorithms'), String(algos)),
+		// What can actually be offloaded - replaces the old "32 algorithms"
+		// counter, which was the driver's registration set and never changed.
+		aui.row(_('Usable ciphers'), cipherCell),
 		// Live tfm users above the registration baseline - the only number on
 		// this card that reflects whether the accelerator is being driven.
-		aui.row(_('In use'), String(sessions)),
+		aui.row(_('Active sessions'), String(sessions)),
 		aui.row('/dev/crypto', Number(cr.devcrypto) === 1 ? aui.pill(_('Available'), 'ok') : aui.pill(_('Unavailable'), 'warn')),
 		aui.row(_('OpenSSL devcrypto'), engineRow),
-		// Since-boot completion interrupts of the engine: the sum of the leading
-		// per-CPU columns only. The hwirq number on the same /proc/interrupts
-		// line is an identifier, not a count, so it must stay out of the total.
-		// Remains 0 as long as the engine is merely registered, never driven.
-		aui.row(_('Hardware IRQs'), typeof cr.irqs === 'number' ? aui.fmtK(cr.irqs) : '—')
+		// Since-boot completion interrupts: the sum of the leading per-CPU
+		// columns only. The hwirq number on the same /proc/interrupts line is an
+		// identifier, not a count, so it must stay out of the total.
+		aui.row(_('Cumulative IRQs'), typeof cr.irqs === 'number' ? aui.fmtK(cr.irqs) : '—'),
+		aui.row(_('IRQ rate'), rateText)
 	];
 	var body = [ E('div', {}, rows) ];
 	return E('div', { 'style': 'margin-top:var(--ds-sp-4)' }, [

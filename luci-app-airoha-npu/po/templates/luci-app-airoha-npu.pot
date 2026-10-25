@@ -881,3 +881,18 @@ msgstr ""
 
 msgid "CPU Usage History"
 msgstr ""
+
+msgid "Usable ciphers"
+msgstr ""
+
+msgid "Active sessions"
+msgstr ""
+
+msgid "Cumulative IRQs"
+msgstr ""
+
+msgid "IRQ rate"
+msgstr ""
+
+msgid "Only the ciphers listed below are offloaded through /dev/crypto; every other algorithm, AES-CBC included, stays in software on the CPU."
+msgstr ""
