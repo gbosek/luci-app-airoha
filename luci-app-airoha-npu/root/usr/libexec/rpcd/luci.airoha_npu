@@ -720,7 +720,7 @@ get_frame_engine() {
 # and the engine list cannot change before a reboot, so its answer is cached
 # for a minute to keep repeated page loads cheap.
 get_crypto_info() {
-	local present=0 bound=0 algos=0 refs=0 algostat="" chardev=0 openssl=0 engine="" irqs="null"
+	local present=0 bound=0 algos=0 refs=0 sess=0 algostat="" chardev=0 openssl=0 engine="" irqs="null"
 	local dir now stamp saved age cache="/tmp/luci-airoha-npu.crypto.cache"
 
 	[ -d /sys/module/crypto_hw_eip93 ] && present=1
@@ -746,11 +746,17 @@ get_crypto_info() {
 	#
 	# refcnt is the number of live tfm users of that algorithm, and it is the
 	# only built-in counter this driver exposes (there is no debugfs node on the
-	# vendor kernel): summing it over the EIP93 blocks shows how many sessions
-	# are actually bound to the accelerator right now. The field ordering
-	# (driver before refcnt) holds on both 5.4 and 6.x, but `matched` is reset
-	# on every name line so a reordered or extra field can never leak a count
-	# from another block.
+	# vendor kernel). It is NOT a load counter as printed: every algorithm in
+	# the registered set carries a permanent baseline of 1, so summing it raw
+	# reproduces the algorithm count (32/32 on a completely idle engine - the
+	# generic software blocks read the same baseline, which proves the value is
+	# registration state and not usage). Only the references above that
+	# baseline are live sessions, hence max(0, refcnt - 1) per block; both the
+	# raw sum (`refcnt`) and the derived `sessions` are published so the card
+	# can show a number that actually moves. The field ordering (driver before
+	# refcnt) holds on both 5.4 and 6.x, but `matched` is reset on every name
+	# line so a reordered or extra field can never leak a count from another
+	# block.
 	if [ -r /proc/crypto ]; then
 		algostat=$(awk '
 			/^name[ \t]*:/ {
@@ -773,24 +779,39 @@ get_crypto_info() {
 					value = $0
 					sub(/^refcnt[ \t]*:[ \t]*/, "", value)
 					sub(/[ \t]+$/, "", value)
-					if (value ~ /^[0-9]+$/) refs += value
+					if (value ~ /^[0-9]+$/) {
+						value += 0
+						refs += value
+						if (value > 1) extra += value - 1
+					}
 				}
 			}
-			END { printf "%d|%d", n + 0, refs + 0 }
+			END { printf "%d|%d|%d", n + 0, refs + 0, extra + 0 }
 		' /proc/crypto 2>/dev/null)
 		algos="${algostat%%|*}"
-		refs="${algostat#*|}"
+		algostat="${algostat#*|}"
+		refs="${algostat%%|*}"
+		sess="${algostat#*|}"
 		case "$algos" in ''|*[!0-9]*) algos=0 ;; esac
 		case "$refs" in ''|*[!0-9]*) refs=0 ;; esac
+		case "$sess" in ''|*[!0-9]*) sess=0 ;; esac
 	fi
 
 	# EIP93 sits on GIC SPI 44; the line name is the platform device
 	# (1fb70000.crypto) on newer kernels and the driver name on older ones, so
-	# both are accepted. Summing the per-CPU columns gives a since-boot total.
+	# both are accepted. The line layout is
+	#   IRQ:  cpu0 cpu1 ...   GICv3  <hwirq>  Level  <device>
+	# so only the leading per-CPU columns are counts and the loop must stop at
+	# the first non-numeric field. Accumulating every numeric field (the old
+	# behaviour) added the hwirq number as well, which is why an engine that had
+	# never fired still reported 76: that is SPI 44 + 32, not 76 interrupts.
 	irqs=$(awk '
 		/crypto@1fb70000|1fb70000\.crypto|eip93/ {
 			found = 1
-			for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+$/) sum += $i
+			for (i = 2; i <= NF; i++) {
+				if ($i ~ /^[0-9]+$/) sum += $i
+				else break
+			}
 		}
 		END { if (found) print sum + 0; else print "" }
 	' /proc/interrupts 2>/dev/null)
@@ -821,8 +842,8 @@ get_crypto_info() {
 		fi
 	fi
 
-	printf '{"available":true,"present":%d,"bound":%d,"algos":%d,"refcnt":%d,"devcrypto":%d,"openssl":%d,"engine":%s,"irqs":%s}' \
-		"$present" "$bound" "$algos" "$refs" \
+	printf '{"available":true,"present":%d,"bound":%d,"algos":%d,"refcnt":%d,"sessions":%d,"devcrypto":%d,"openssl":%d,"engine":%s,"irqs":%s}' \
+		"$present" "$bound" "$algos" "$refs" "$sess" \
 		"$chardev" "$openssl" "${engine:-null}" "$irqs"
 }
 

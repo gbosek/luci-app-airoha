@@ -1524,6 +1524,17 @@ function renderCryptoStatus(cr) {
 
 	var active = Number(cr.present) === 1;
 	var algos = Number(cr.algos) || 0;
+	/* /proc/crypto prints refcnt as the number of tfm users of an algorithm,
+	 * but every registered algorithm holds a permanent baseline of 1: an idle
+	 * engine still reads refcnt == algos (32/32 measured on 6.18, and the
+	 * generic software blocks read the same 1), so the raw sum is a static
+	 * mirror of the algorithm count and never moves with load. The backend
+	 * publishes `sessions` = sum of max(0, refcnt - 1), the only part that can
+	 * actually change; a backend predating the field falls back to the same
+	 * subtraction here. */
+	var sessions = (cr.sessions === undefined || cr.sessions === null)
+		? Math.max(0, (Number(cr.refcnt) || 0) - algos)
+		: (Number(cr.sessions) || 0);
 	var engineRow;
 	if (Number(cr.openssl) !== 1)
 		engineRow = _('openssl-util not installed');
@@ -1538,11 +1549,15 @@ function renderCryptoStatus(cr) {
 		aui.row(_('Status'), active ? aui.pill(_('Activated'), 'ok') : aui.pill(_('Driver unavailable'), 'warn')),
 		aui.row(_('Bound device'), active && Number(cr.bound) === 1 ? '1fb70000.crypto' : _('Not bound')),
 		aui.row(_('Algorithms'), String(algos)),
-		// /proc/crypto refcnt is the number of live tfm users on this engine, so
-		// it shows whether the accelerator is actually being driven right now.
-		aui.row(_('In use'), String(Number(cr.refcnt) || 0)),
+		// Live tfm users above the registration baseline - the only number on
+		// this card that reflects whether the accelerator is being driven.
+		aui.row(_('In use'), String(sessions)),
 		aui.row('/dev/crypto', Number(cr.devcrypto) === 1 ? aui.pill(_('Available'), 'ok') : aui.pill(_('Unavailable'), 'warn')),
 		aui.row(_('OpenSSL devcrypto'), engineRow),
+		// Since-boot completion interrupts of the engine: the sum of the leading
+		// per-CPU columns only. The hwirq number on the same /proc/interrupts
+		// line is an identifier, not a count, so it must stay out of the total.
+		// Remains 0 as long as the engine is merely registered, never driven.
 		aui.row(_('Hardware IRQs'), typeof cr.irqs === 'number' ? aui.fmtK(cr.irqs) : '—')
 	];
 	var body = [ E('div', {}, rows) ];
