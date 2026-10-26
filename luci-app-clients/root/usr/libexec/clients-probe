@@ -37,7 +37,8 @@
  *
  * `names` maps MAC -> hostname from the lease file, the luci-rpc hints and
  * the DHCP Host-Name option heard on the bridge, in that priority. On a
- * routed box one final PTR pass asks the local dnsmasq; a bridging device
+ * routed box one final PTR pass asks the local dnsmasq when the page is
+ * being watched (the background collector passes it by); a bridging device
  * (AP mode) never queries anything.
  *
  * Subcommands:
@@ -1436,7 +1437,7 @@ function ptr_names(names, ipMac, candidates, local) {
 		ptr_cache_save(cache);
 }
 
-function snapshot() {
+function snapshot(withPtr) {
 	let lan = lan_state();
 	let devices = device_names(lan.interfaces);
 	let arp = arp_entries(devices);
@@ -1457,11 +1458,15 @@ function snapshot() {
 		if (names[mac] == null)
 			names[mac] = name;
 
-	/* Last source, first answer - routed boxes only. On a bridging device
-	 * (AP mode) the answering server would be the upstream router, and an
-	 * AP does not ask the network for names: it listens to the wire (the
-	 * DHCP Host-Name option above) and accepts what it hears. Skipping the
-	 * pass also saves the nslookup subprocesses entirely. */
+	/* Last source, first answer - and only when someone is watching. The
+	 * page pulls this live snapshot every few seconds, so the pass runs
+	 * there, driven by the viewer; the background collector passes false
+	 * and never spawns an nslookup. On a bridging device (AP mode) it is
+	 * skipped even here: the answering server would be the upstream router,
+	 * and an AP does not ask the network for names - it listens to the wire
+	 * (the DHCP Host-Name option above) and accepts what it hears. The
+	 * cache TTLs keep a watched page from re-asking names it already
+	 * resolved. */
 	let ipMac = {};
 
 	for (let entry in arp)
@@ -1478,7 +1483,7 @@ function snapshot() {
 		if (index(lan.local, ip) < 0)
 			push(candidates, ip);
 
-	if (!bridge.mode)
+	if (withPtr && !bridge.mode)
 		ptr_names(names, ipMac, candidates, lan.local);
 
 	/* Every address ARP resolved belongs in the answer even with zero counters,
@@ -1781,7 +1786,9 @@ if (length(ARGV)) {
 	let result;
 
 	if (cmd == 'collect')
-		result = history_merge(path, snapshot(), int(ARGV[2]) ?? 7);
+		/* false: the collector runs whether or not anyone looks at the page,
+		 * and PTR resolution must follow the viewer, not the clock. */
+		result = history_merge(path, snapshot(false), int(ARGV[2]) ?? 7);
 	else if (cmd == 'read')
 		result = history_load(path);
 	else if (cmd == 'nlbw') {
@@ -1813,4 +1820,4 @@ if (length(ARGV)) {
 	exit((result.ok == false) ? 1 : 0);
 }
 
-print(sprintf('%J\n', snapshot()));
+print(sprintf('%J\n', snapshot(true)));

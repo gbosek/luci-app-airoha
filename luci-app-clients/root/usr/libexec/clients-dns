@@ -258,9 +258,12 @@ let log_path = function() {
 /* ---------------- collect ---------------- */
 
 let collect = function() {
-	let path = log_path();
-	let data = load_archive();
-	let ctx = { year: local_year(), zone: zone_offset(), now: time() };
+	/* The cheapest test first, and no subprocess before it: a file existence
+	 * check costs nothing next to a fork. The default log is statted directly
+	 * and uci is only asked where dnsmasq logs when that file is absent - on
+	 * a device that runs no logging dnsmasq (a bridging AP) this pass used
+	 * to pay for a uci subprocess every ten seconds to learn nothing. */
+	let path = DEFAULT_LOG;
 	let size = 0;
 
 	try {
@@ -269,6 +272,34 @@ let collect = function() {
 	catch (e) {
 		size = 0;
 	}
+
+	if (size == 0) {
+		path = log_path();
+
+		try {
+			size = fs.stat(path).size ?? 0;
+		}
+		catch (e) {
+			size = 0;
+		}
+	}
+
+	/* Nothing to read and the archive holds no position in a log: a device
+	 * without local dnsmasq lands here every pass, loading nothing beyond
+	 * a tiny empty archive and forking nothing at all. */
+	if (size == 0) {
+		let idle = load_archive();
+
+		if ((int(idle.offset) ?? 0) > 0) {
+			idle.offset = 0;
+			write_archive(idle);
+		}
+
+		return { ok: true, path: ARCHIVE, log: path, added: 0, records: length(idle.records), offset: idle.offset };
+	}
+
+	let data = load_archive();
+	let now = time();
 
 	/* A smaller file than our offset means dnsmasq recreated or truncated it;
 	 * starting over is the only correct reading. */
@@ -302,6 +333,15 @@ let collect = function() {
 	let text = substr(fresh, 0, consumed);
 	let lines = length(text) ? split(text, '\n') : [];
 	let added = 0;
+
+	/* The context is built lazily: the year and the zone offset each cost a
+	 * date subprocess, and rows need them only when there is something to
+	 * parse. A quiet log - the common case between two client lookups -
+	 * now parses nothing and forks nothing. */
+	let ctx = null;
+
+	if (length(lines))
+		ctx = { year: local_year(), zone: zone_offset(), now: now };
 
 	/* id -> record, so a forwarded line can backfill the row its query created
 	 * without scanning the archive. */
@@ -384,7 +424,7 @@ let collect = function() {
 	for (let key in data.queries) {
 		let pending = data.queries[key];
 
-		if ((int(pending.t) ?? 0) < ctx.now - PENDING_TTL)
+		if ((int(pending.t) ?? 0) < now - PENDING_TTL)
 			delete data.queries[key];
 	}
 
@@ -392,7 +432,7 @@ let collect = function() {
 		data.records = slice(data.records, length(data.records) - MAX_RECORDS);
 
 	if (added > 0 || consumed > 0)
-		data.updated = ctx.now;
+		data.updated = now;
 
 	if (added > 0 || consumed > 0)
 		return {
