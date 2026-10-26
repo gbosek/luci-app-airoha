@@ -487,9 +487,6 @@ msgstr "暂停"
 msgid "Peak"
 msgstr "峰值"
 
-msgid "Per-band airtime efficiency, negotiated and expected rates, failure counts and BND/UNB ownership."
-msgstr "每频段的空口效率、协商与期望速率、失败计数以及 BND/UNB 归属。"
-
 msgid "Physical Bottleneck"
 msgstr "物理瓶颈"
 
@@ -796,14 +793,8 @@ msgstr "状态"
 msgid "PHY / Expected"
 msgstr "协商 / 预期速率"
 
-msgid "Switches here apply the hardware offload settings for this device."
-msgstr "此处开关用于应用本设备的硬件卸载设置。"
-
 msgid "Frame Engine"
 msgstr "帧引擎"
-
-msgid "Register-level counters for the GDM data MACs and CDM DMA engines. The PPE table line on each CDM card is the flow-table slice owned by that engine."
-msgstr "GDM 数据 MAC 与 CDM DMA 引擎的寄存器级计数。每张 CDM 卡片上的 PPE 表区行是该引擎所辖的流表分片。"
 
 msgid "GDM Ports"
 msgstr "GDM 端口"
@@ -837,12 +828,6 @@ msgstr "硬件快速路径"
 
 msgid "HW fast dropped"
 msgstr "硬件快速路径丢弃"
-
-msgid "TSO queue"
-msgstr "TSO 队列"
-
-msgid "TSO dropped"
-msgstr "TSO 丢弃"
 
 msgid "Per-CPU RX"
 msgstr "各 CPU 接收"
@@ -883,17 +868,8 @@ msgstr "已发送"
 msgid "CPU Usage History"
 msgstr "CPU 占用率历史"
 
-msgid "Usable ciphers"
-msgstr "可加速算法"
-
 msgid "Active sessions"
 msgstr "活跃会话"
 
 msgid "Cumulative IRQs"
-msgstr "中断累计"
-
-msgid "IRQ rate"
-msgstr "中断速率"
-
-msgid "Only the ciphers listed below are offloaded through /dev/crypto; every other algorithm, AES-CBC included, stays in software on the CPU."
-msgstr "仅下列算法经 /dev/crypto 卸载到硬件，其余算法（含 AES-CBC）仍由 CPU 软件实现。"
+msgstr "加速累计"

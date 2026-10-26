@@ -489,9 +489,6 @@ msgstr ""
 msgid "Peak"
 msgstr ""
 
-msgid "Per-band airtime efficiency, negotiated and expected rates, failure counts and BND/UNB ownership."
-msgstr ""
-
 msgid "Physical Bottleneck"
 msgstr ""
 
@@ -795,13 +792,7 @@ msgstr ""
 msgid "PHY / Expected"
 msgstr ""
 
-msgid "Switches here apply the hardware offload settings for this device."
-msgstr ""
-
 msgid "Frame Engine"
-msgstr ""
-
-msgid "Register-level counters for the GDM data MACs and CDM DMA engines. The PPE table line on each CDM card is the flow-table slice owned by that engine."
 msgstr ""
 
 msgid "GDM Ports"
@@ -835,12 +826,6 @@ msgid "HW fast path"
 msgstr ""
 
 msgid "HW fast dropped"
-msgstr ""
-
-msgid "TSO queue"
-msgstr ""
-
-msgid "TSO dropped"
 msgstr ""
 
 msgid "Per-CPU RX"
@@ -882,17 +867,8 @@ msgstr ""
 msgid "CPU Usage History"
 msgstr ""
 
-msgid "Usable ciphers"
-msgstr ""
-
 msgid "Active sessions"
 msgstr ""
 
 msgid "Cumulative IRQs"
-msgstr ""
-
-msgid "IRQ rate"
-msgstr ""
-
-msgid "Only the ciphers listed below are offloaded through /dev/crypto; every other algorithm, AES-CBC included, stays in software on the CPU."
 msgstr ""
