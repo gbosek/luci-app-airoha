@@ -244,7 +244,7 @@ return L.Class.extend({
 			E('td', { 'class': 'clients__addr' }, entry.mac || '-'),
 			E('td', {}, this.networkCell(entry)),
 			this.hasWifi ? E('td', {}, this.signalCell(entry)) : null,
-			E('td', { 'class': 'clients__num' }, this.trafficCell(entry, 'wan')),
+			E('td', { 'class': 'clients__ctr' }, this.trafficCell(entry, 'wan')),
 			E('td', { 'class': 'clients__ctr' }, common.formatCount(entry.conns)),
 			E('td', { 'class': 'clients__seen', 'title': common.absoluteTime(entry.last) }, [
 				E('div', { 'class': 'clients__seen-last' }, seen),
@@ -382,7 +382,7 @@ return L.Class.extend({
 				 * moves, the arrows name which line is which. Connections is a
 				 * single short number per row - centring header and value makes
 				 * the pairing obvious without a ruler. */
-				this.headerCell(_('Live rate') + ' (↑ / ↓)', 'wan', 'clients__num'),
+				this.headerCell(_('Live rate') + ' (↑ / ↓)', 'wan', 'clients__ctr'),
 				this.headerCell(_('Connections'), 'conns', 'clients__ctr'),
 				this.headerCell(_('Last seen'), 'last')
 			);

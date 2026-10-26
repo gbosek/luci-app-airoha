@@ -351,11 +351,19 @@ table.clients tr.clients__offline td {
 	white-space: nowrap;
 }
 
-/* The connection count is one short number per row: centred, header and
- * value meet in the middle of the column and read as a pair. */
+/* The connection count is one short number per row, and the live-rate cell
+ * stacks rate over session total: both are centred, header and value meet
+ * on the column's middle axis. The traffic cell nests flex columns whose
+ * children default to stretch-left, so each level opts back into centring. */
 .clients__ctr {
 	text-align: center;
 	white-space: nowrap;
+}
+
+.clients__ctr .clients__traffic,
+.clients__ctr .clients__traffic-rate,
+.clients__ctr .clients__traffic-total {
+	align-items: center;
 }
 
 .clients__name {
