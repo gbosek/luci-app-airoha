@@ -10,7 +10,25 @@ PROBE=/usr/libexec/clients-probe
 DNS=/usr/libexec/clients-dns
 SNOOP=/usr/libexec/clients-snoop
 
+# The DNS archive reads dnsmasq's own query log, and UCI carries the
+# log-facility pointing at it. OpenWrt's stock /etc/dnsmasq.conf also ships an
+# active log-facility line, and a second occurrence is a hard startup error on
+# dnsmasq 2.93+ ("illegal repeated keyword") - dnsmasq ends up in a procd
+# crash loop and DHCP dies for the whole LAN. postinst comments the stock line
+# out, but a keep-config sysupgrade restores /etc/dnsmasq.conf verbatim and
+# postinst never runs again, so start_service re-enforces the invariant on
+# every boot, before procd's next dnsmasq retry lands.
+fix_dnsmasq_conf() {
+	local conf=/etc/dnsmasq.conf
+	[ -e "$conf" ] || return 0
+	grep -q '^log-facility=' "$conf" || return 0
+	sed -i -e 's|^log-facility=|#&|' "$conf"
+	/etc/init.d/dnsmasq restart 2>/dev/null
+}
+
 start_service() {
+	fix_dnsmasq_conf
+
 	local enabled interval retention path
 	local dns_enabled dns_interval
 	local snoop_enabled

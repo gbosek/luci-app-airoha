@@ -28,7 +28,7 @@ LUCI_DEPENDS:=+luci-base +ucode +ucode-mod-fs +ucode-mod-ubus +rpcd-mod-iwinfo
 LUCI_DESCRIPTION:=One place for every LAN client: addresses with their source, \
 	WAN traffic, and the DNS lookups each device made.
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_LICENSE:=Apache-2.0
 
@@ -43,14 +43,19 @@ PKG_LICENSE:=Apache-2.0
 
 # dnsmasq query logging has one trap worth spelling out: OpenWrt ships
 # log-facility=/dev/null inside /etc/dnsmasq.conf, and a second log-facility
-# emitted from UCI aborts startup with "illegal repeated keyword at line N" -
-# DNS stops entirely, including for every client on the LAN. So the base
-# directive is commented out and UCI becomes the only source for the path.
-# prerm puts it back, but only for the exact placeholder this installed.
+# emitted from UCI aborts startup with "illegal repeated keyword at line N"
+# on dnsmasq 2.93+ - DNS stops entirely, including for every client on the
+# LAN. So the base directive is commented out and UCI becomes the only source
+# for the path. Two guards keep it that way: postinst runs at install time,
+# and /etc/init.d/clients re-enforces it on every start_service - a
+# keep-config sysupgrade restores /etc/dnsmasq.conf verbatim and postinst
+# never runs again, which is exactly how a freshly flashed board ends up with
+# DHCP dead. prerm puts it back, but only for the exact placeholder this
+# installed.
 
 define Package/luci-app-clients/postinst
 [ -n "$${IPKG_INSTROOT}" ] || { \
-	[ -e /etc/dnsmasq.conf ] && sed -i -e 's|^log-facility=.*|#log-facility=/dev/null|' /etc/dnsmasq.conf; \
+	[ -e /etc/dnsmasq.conf ] && sed -i -e 's|^log-facility=|#&|' /etc/dnsmasq.conf; \
 	uci -q set dhcp.@dnsmasq[0].logqueries='1'; \
 	uci -q set dhcp.@dnsmasq[0].logfacility='/tmp/dnsmasq.log'; \
 	uci -q commit dhcp; \
