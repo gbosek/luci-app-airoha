@@ -118,7 +118,29 @@ apply_cpu_settings() {
 	[ -n "$applied_governor" ]
 }
 
+# rpcd scans /usr/libexec/rpcd only once at startup and silently skips scripts
+# that are not executable. A first boot after flashing has been observed with
+# luci.airoha_npu missing from `ubus list`, which makes every call from the
+# status page fail with "Not found" until rpcd is restarted by hand. Reuse the
+# existing rpcd reload path once if the object is absent; it is a no-op when
+# registration succeeded, and reload does re-scan the directory.
+ensure_rpcd_backend() {
+	local i
+
+	ubus list luci.airoha_npu >/dev/null 2>&1 && return 0
+	log_warn "luci.airoha_npu is not registered with rpcd; reloading rpcd"
+	/etc/init.d/rpcd reload 2>/dev/null
+	for i in $(seq 1 10); do
+		ubus list luci.airoha_npu >/dev/null 2>&1 && return 0
+		sleep 1
+	done
+	log_warn "luci.airoha_npu still not registered after rpcd reload"
+	return 1
+}
+
 start() {
+	ensure_rpcd_backend
+
 	# Wait (bounded, ~15s) for cpufreq to appear before applying persisted settings.
 	local i=0
 	while ! find_cpufreq_policy >/dev/null && [ $i -lt "$CPUFREQ_WAIT_SECS" ]; do
