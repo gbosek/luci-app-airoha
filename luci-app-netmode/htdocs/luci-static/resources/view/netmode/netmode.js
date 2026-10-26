@@ -63,9 +63,23 @@ var css = [
 	'@media(max-width:760px){.nm-grid,.nm-form{grid-template-columns:1fr}}'
 ].join('\n');
 
-var darkVars = ':root{--nm-bg:#1e1f22;--nm-border:#3a3d42;--nm-soft:#26282d;--nm-text:#f0f3f6;--nm-muted:#a7adb5;--nm-blue:#4d9cf6;--nm-green:#4ac26b;--nm-orange:#e3934a;--nm-red:#f47067}';
+/* The dark re-tune has to be more specific than the base `.netmode-page` rule.
+ * Custom properties declared on the element itself always beat the ones it
+ * would inherit from an ancestor, so a bare `:root{...}` block never applies
+ * here - whatever the cascade order. `:root .netmode-page` wins because it
+ * matches the same element with one more compound selector. */
+var darkVars = ':root .netmode-page{--nm-bg:#252526;--nm-border:#454545;--nm-soft:#1e1e1e;--nm-text:#cccccc;--nm-muted:#adb5bd;--nm-blue:#4d9cf6;--nm-green:#4ac26b;--nm-orange:#e3934a;--nm-red:#f47067}';
 
 function isDarkMode() {
+	/* Argon v3 states the appearance explicitly on <html data-argon-mode>. The
+	 * server renders "light"/"dark"/"normal", and the in-page switcher rewrites
+	 * the attribute at runtime. "normal" means "follow the OS preference", so
+	 * it falls through to the probes below just like an absent attribute. */
+	var html = document.documentElement;
+	var argonMode = html ? String(html.getAttribute('data-argon-mode') || '').toLowerCase() : '';
+	if (argonMode === 'dark') return true;
+	if (argonMode === 'light') return false;
+
 	/* Probe order matters: the first element with an opaque background wins.
 	 * - body carries the theme background in every LuCI theme.
 	 * - .main-left is Argon's sidebar: var(--menu-bg-color) (#ffffff) when
@@ -106,6 +120,9 @@ function isDarkMode() {
 	return false;
 }
 
+/* Registered once per document: injectCSS() itself runs again on every render. */
+var appearanceWatched = false;
+
 function injectCSS() {
 	var el = document.getElementById('netmode-css');
 	if (!el) {
@@ -113,7 +130,26 @@ function injectCSS() {
 		el.id = 'netmode-css';
 		document.head.appendChild(el);
 	}
-	el.textContent = css + (isDarkMode() ? darkVars : '');
+	el.textContent = css + (isDarkMode() ? '\n' + darkVars : '');
+
+	/* Follow a live appearance change without a reload. Argon v3's switcher
+	 * rewrites data-argon-mode on <html>; its "normal" mode and most other
+	 * themes deliver the dark palette through prefers-color-scheme. */
+	if (!appearanceWatched) {
+		appearanceWatched = true;
+		try {
+			var mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+			if (mq && mq.addEventListener)
+				mq.addEventListener('change', injectCSS);
+		} catch (e) {}
+		try {
+			if (window.MutationObserver)
+				new MutationObserver(injectCSS).observe(document.documentElement, {
+					attributes: true,
+					attributeFilter: [ 'data-argon-mode' ]
+				});
+		} catch (e) {}
+	}
 }
 
 var MODE_LABELS = {
