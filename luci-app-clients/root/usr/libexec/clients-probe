@@ -35,6 +35,9 @@
  *     "snoop6": [ { "mac": "E8:68:B1:36:F4:75", "ip": "2408:...", "fresh": true } ]
  *   }
  *
+ * `names` maps MAC -> hostname from the lease file, the luci-rpc hints and
+ * the DHCP Host-Name option heard on the bridge, in that priority.
+ *
  * Subcommands:
  *
  *   clients-probe collect           sample, merge into the history file
@@ -1107,7 +1110,10 @@ function valid_ip4_text(text) {
  * nothing, the kernel never resolves a client's global IPv6 address, and the
  * only place the assignments are visible is the traffic crossing the bridge.
  * The snoop file carries that - DHCPACK assignments per MAC and IPv6
- * addresses learned from neighbour discovery - both keyed by MAC.
+ * addresses learned from neighbour discovery - plus the Host-Name option the
+ * clients themselves sent, keyed by MAC. The names are not freshness-gated:
+ * a hostname learned three days ago is still the best answer for that MAC,
+ * which is exactly why the lease file is read the same way.
  */
 function snoop_state() {
 	let raw = read(SNOOP_FILE);
@@ -1130,6 +1136,7 @@ function snoop_state() {
 	let hosts6 = (type(parsed.hosts6) == 'object') ? parsed.hosts6 : {};
 	let snoop4 = [];
 	let snoop6 = [];
+	let names = {};
 	let cutoff = time() - SNOOP_FRESH;
 
 	for (let mac, entry in dhcp4) {
@@ -1159,7 +1166,18 @@ function snoop_state() {
 		}
 	}
 
-	return { snoop4: snoop4, snoop6: snoop6 };
+	if (type(parsed.names) == 'object')
+		for (let mac, entry in parsed.names) {
+			let hw = valid_mac_text(mac);
+			let name = entry?.name;
+
+			if (hw == null || type(name) != 'string' || !length(name))
+				continue;
+
+			names[hw] = name;
+		}
+
+	return { snoop4: snoop4, snoop6: snoop6, names: names };
 }
 
 function snapshot() {
@@ -1173,6 +1191,15 @@ function snapshot() {
 	let names = host_names(leases);
 	let snoop = snoop_state();
 	let bridge = port_counters();
+
+	/* Names the clients reported themselves (DHCP option 12, heard on the
+	 * bridge) fill the gaps the lease file and the hints leave open - which
+	 * on a bridging device is all of them, since neither source exists
+	 * there. A locally served lease outranks what was overheard, so snoop
+	 * only ever completes the map, never overrides it. */
+	for (let mac, name in snoop?.names ?? {})
+		if (names[mac] == null)
+			names[mac] = name;
 
 	/* Every address ARP resolved belongs in the answer even with zero counters,
 	 * so the page can list a host that has not spoken yet. The scope sub-objects

@@ -15,6 +15,9 @@
  *
  *   DHCPACK    the upstream server assigning an IPv4 address, with the
  *              client's hardware address in the payload
+ *   Hostname   the client's own option 12, riding on DISCOVER/REQUEST -
+ *              on a bridge this is the only place a hostname is ever
+ *              visible, because dnsmasq leases nothing here
  *   NS (::)    the duplicate-address probe every freshly configured IPv6
  *              address sends - the sender owns the target
  *   NA         a host announcing one of its own addresses
@@ -66,7 +69,7 @@ const MAX_V6 = 6;
 const MAC_RX = /^([0-9a-f]{2}(:[0-9a-f]{2}){5})$/;
 const IP4_RX = /^([0-9]{1,3}(\.[0-9]{1,3}){3})$/;
 
-let data = { updated: 0, dhcp4: {}, hosts6: {} };
+let data = { updated: 0, dhcp4: {}, hosts6: {}, names: {} };
 let dirty = false;
 let lastFlush = 0;
 
@@ -133,6 +136,30 @@ function valid_ip6(text) {
 	return text;
 }
 
+/* A client-reported name is kept with a light touch: printable, bounded,
+ * no escape noise. tcpdump renders non-printable bytes as \ooo inside the
+ * quotes, so any backslash means the bytes were not a real name. */
+function valid_name(text) {
+	if (type(text) != 'string')
+		return null;
+
+	text = trim(text, ' .\t');
+
+	let len = length(text);
+
+	if (len < 1 || len > 64)
+		return null;
+
+	for (let i = 0; i < len; i++) {
+		let code = ord(text, i);
+
+		if (code < 32 || code > 126 || code == 92)
+			return null;
+	}
+
+	return text;
+}
+
 /* ---------------- storage ---------------- */
 
 function load() {
@@ -161,6 +188,10 @@ function load() {
 		return;
 
 	data = parsed;
+
+	/* Files written before the Host-Name capture carry no table. */
+	if (type(data.names) != 'object')
+		data.names = {};
 }
 
 function flush(force) {
@@ -219,6 +250,13 @@ function record_dhcp4(mac, ip) {
 	dirty = true;
 }
 
+/* Newest name wins; a client that renamed itself keeps one row. */
+function record_name(mac, name) {
+	data.names[mac] = { name: name, ts: time() };
+	trim_hosts(data.names);
+	dirty = true;
+}
+
 function record_host6(mac, ip) {
 	let host = data.hosts6[mac] ?? {};
 
@@ -256,7 +294,14 @@ let block = null;
 /* Pull the identifying fields out of one line of a DHCP packet. tcpdump
  * spreads them across the header line and the indented option lines, and
  * moved "yiaddr" to "Your-IP" between releases, so every line of the block
- * goes through the same three probes. */
+ * goes through the same probes.
+ *
+ * The Host-Name option changed shape more than once: current releases print
+ * the short label "Hostname (12), length 9: "desk-abc"", older ones
+ * "Host-Name Option 12, length 9: "desk-abc"" or "Option 12, length 9: ...".
+ * All three end in a quoted string, which is what the probes match on - the
+ * bare "Hostname (12)" inside a Parameter-Request list carries no quotes and
+ * therefore cannot match. */
 function scan_dhcp(line, blk) {
 	let mac = match(line, /Client-Ethernet-Address ([0-9a-fA-F:]{17})/);
 
@@ -270,6 +315,13 @@ function scan_dhcp(line, blk) {
 
 	if (yiaddr != null)
 		blk.ip4 = valid_ip4(yiaddr[2]) ?? blk.ip4;
+
+	let name = match(line, /Hostname \(12\)[^"]*"([^"]+)"/) ??
+		match(line, /Host-Name[^"]*"([^"]+)"/) ??
+		match(line, /Option 12, length[^"]*"([^"]+)"/);
+
+	if (name != null)
+		blk.name = valid_name(name[1]) ?? blk.name;
 }
 
 function flush_block() {
@@ -279,6 +331,12 @@ function flush_block() {
 	if (block.ack && block.mac != null && block.ip4 != null)
 		record_dhcp4(block.mac, block.ip4);
 
+	/* The name rides on the client's own DISCOVER/REQUEST, which are not
+	 * ACKs - so it is recorded on its own terms instead of behind the ACK
+	 * gate the address assignment needs. */
+	if (block.mac != null && block.name != null)
+		record_name(block.mac, block.name);
+
 	block = null;
 }
 
@@ -286,7 +344,8 @@ function open_block(line) {
 	block = {
 		ack: match(line, /type 5\b/) != null,
 		mac: null,
-		ip4: null
+		ip4: null,
+		name: null
 	};
 
 	scan_dhcp(line, block);

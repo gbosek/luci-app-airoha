@@ -593,6 +593,25 @@ function buildClients(state) {
 			entry.online = true;
 	});
 
+	/* Names the probe heard on the wire itself: the DHCP Host-Name option
+	 * clients-snoop captured on the bridge, folded into the snapshot's
+	 * `names`. On a bridging device this is the only name source that
+	 * exists - no local lease file, no hints with names - and it covers the
+	 * clients an ARP row never will, because the AP does not talk to them.
+	 * Placed after every row-creating source above so a wireless-only or
+	 * snoop-fed row is already there to receive it; enrich-only, exactly
+	 * like the hints earlier. */
+	Object.keys(state.names || {}).forEach(function(mac) {
+		var normalised = normalizeMAC(mac);
+		var entry = normalised ? clients[normalised.toLowerCase()] : null;
+
+		if (!entry)
+			return;
+
+		if (!entry.hostname)
+			entry.hostname = state.names[mac];
+	});
+
 
 	/* Fold a DUID-keyed orphan into the MAC row that already owns its address. */
 	var macOfAddress = Object.create(null);
@@ -942,6 +961,7 @@ function createStore() {
 			bridge: null,
 			snoop4: [],
 			snoop6: [],
+			names: {},
 			reserved4: Object.create(null),
 			ip6Source: Object.create(null),
 			ip4Source: Object.create(null)
@@ -1067,6 +1087,7 @@ function createStore() {
 				self.state.bridge = bridge;
 				self.state.snoop4 = Array.isArray(data.snoop4) ? data.snoop4 : [];
 				self.state.snoop6 = Array.isArray(data.snoop6) ? data.snoop6 : [];
+				self.state.names = (data.names && typeof data.names == 'object') ? data.names : {};
 
 				return data;
 			});
@@ -1201,7 +1222,8 @@ function createStore() {
 				archive: this.archive,
 				nlbw: this.nlbw,
 				snoop4: this.state.snoop4,
-				snoop6: this.state.snoop6
+				snoop6: this.state.snoop6,
+				names: this.state.names
 			});
 		},
 

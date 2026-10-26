@@ -3,6 +3,7 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Project-Id-Version: luci-app-clients\n"
 "Language: zh_Hans\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 
 msgid "Clients"
 msgstr "客户端"
