@@ -915,6 +915,11 @@ function createStore() {
 		archive: {},
 		archiveUpdated: 0,
 		trend: null,
+		/* False until a fetch saw a previous sample to differentiate against.
+		 * The first rate of a session is unknown, not zero - marking the point
+		 * lets the trend chart break the line there instead of drawing the
+		 * fake rise from 0 that reads as a triangle. */
+		baselineSeen: false,
 		lastLeaseLoad: 0,
 		lastHistoryLoad: 0,
 		state: {
@@ -940,6 +945,14 @@ function createStore() {
 			var self = this;
 
 			return fs.exec_direct(PROBE, []).then(function(output) {
+				/* Evaluated before anything below overwrites the previous
+				 * samples: this fetch can only produce a real rate when at
+				 * least one earlier sample existed to diff against. */
+				var hadBaseline = (self.samples != null) || (self.portSamples != null);
+
+				if (hadBaseline)
+					self.baselineSeen = true;
+
 				var data = JSON.parse(output);
 				var now = Date.now();
 				var samples = Object.create(null);
@@ -1185,10 +1198,11 @@ function createStore() {
 			var l2 = this.bridgeRates(false);
 
 			if (l2) {
-				point.lanUp = l2.lanUp;
+			point.lanUp = l2.lanUp;
 				point.lanDown = l2.lanDown;
 				point.wanUp = l2.wanUp;
 				point.wanDown = l2.wanDown;
+				point.valid = (this.baselineSeen === true);
 				point.byMac = Object.create(null);
 				this.trend.push(point);
 
@@ -1215,16 +1229,17 @@ function createStore() {
 				if (!entry.mac || !entry.rate)
 					return;
 
-				point.byMac[entry.mac] = {
-					up: entry.rate.up,
-					down: entry.rate.down,
-					lanUp: entry.rate.lanUp,
-					lanDown: entry.rate.lanDown,
-					wanUp: entry.rate.wanUp,
-					wanDown: entry.rate.wanDown
-				};
-			});
+			point.byMac[entry.mac] = {
+							up: entry.rate.up,
+							down: entry.rate.down,
+							lanUp: entry.rate.lanUp,
+							lanDown: entry.rate.lanDown,
+							wanUp: entry.rate.wanUp,
+							wanDown: entry.rate.wanDown
+						};
+				});
 
+			point.valid = (this.baselineSeen === true);
 			this.trend.push(point);
 
 			if (this.trend.length > TREND_POINTS)

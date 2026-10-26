@@ -57,6 +57,54 @@ function niceCeiling(value) {
 	return 2 * base;
 }
 
+/* ---- hover readout, modelled on the SoC page's CPU usage history ---- */
+
+function chartPointer(svg, evt) {
+	try {
+		if (typeof svg.createSVGPoint === 'function' && svg.getScreenCTM) {
+			var m = svg.getScreenCTM();
+			if (m) {
+				var pt = svg.createSVGPoint();
+				pt.x = evt.clientX; pt.y = evt.clientY;
+				return pt.matrixTransform(m.inverse());
+			}
+		}
+	} catch (e) {
+		/* Fall through to the viewBox mapping below. */
+	}
+
+	var rect = svg.getBoundingClientRect();
+	var vb = String(svg.getAttribute('viewBox') || '').split(/\s+/).map(Number);
+
+	if (!rect.width || vb.length !== 4 || !isFinite(vb[2]) || !isFinite(vb[3]))
+		return null;
+
+	return {
+		x: (evt.clientX - rect.left) / rect.width * vb[2],
+		y: (evt.clientY - rect.top) / Math.max(1, rect.height) * vb[3]
+	};
+}
+
+function chartNearest(xs, x) {
+	var best = 0, bestD = Infinity;
+
+	for (var i = 0; i < xs.length; i++) {
+		var d = Math.abs(xs[i] - x);
+
+		if (d < bestD) { bestD = d; best = i; }
+	}
+
+	return best;
+}
+
+function fmtSampleClock(ms) {
+	var d = new Date(ms);
+
+	function pad(n) { return (n < 10) ? '0' + String(n) : String(n); }
+
+	return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+
 return L.Class.extend({
 	store: null,
 	clients: null,
@@ -213,12 +261,17 @@ return L.Class.extend({
 	},
 
 	renderChart: function() {
-		var points = this.visiblePoints();
+		/* A point whose rate was not measurable (the first sample of a
+		 * session has no baseline to differ against) is skipped entirely:
+		 * drawing it as 0 would fake a rise from the floor and read as a
+		 * triangle, exactly what the CPU usage history chart avoids by
+		 * breaking its line at null samples. */
+		var points = this.visiblePoints().filter(function(p) { return p.valid !== false; });
 		var pick = this.seriesFor();
 
 		var width = 720, height = 220;
-		var padLeft = 58, padRight = 12, padTop = 12, padBottom = 26;
-		var plotW = width - padLeft - padRight;
+		var padX = 8, padTop = 14, padBottom = 10;
+		var plotW = width - padX * 2;
 		var plotH = height - padTop - padBottom;
 
 		if (!points.length) {
@@ -245,10 +298,10 @@ return L.Class.extend({
 		if (t1 <= t0)
 			t1 = t0 + 1000;
 
-		function x(t) { return padLeft + (t - t0) / (t1 - t0) * plotW; }
+		function x(t) { return padX + (t - t0) / (t1 - t0) * plotW; }
 		function y(v) { return padTop + plotH - (v / ceiling) * plotH; }
 
-		function path(key) {
+		function line(key) {
 			return points.map(function(point, index) {
 				var v = values[index][key];
 
@@ -256,35 +309,28 @@ return L.Class.extend({
 			}).join(' ');
 		}
 
+		/* Three anchor labels only - top, middle, floor - the way the SoC
+		 * page's usage history does it; one per gridline crowds the card. */
 		var grid = '';
 
 		for (var i = 0; i <= 4; i++) {
-			var value = ceiling * i / 4;
-			var gy = y(value);
+			var gy = y(ceiling * i / 4);
 
-			grid += '<line x1="' + padLeft + '" y1="' + gy.toFixed(1)
-				+ '" x2="' + (width - padRight) + '" y2="' + gy.toFixed(1)
-				+ '" stroke="var(--cl-rule)" stroke-width="1"/>'
-				+ '<text x="' + (padLeft - 8) + '" y="' + (gy + 3).toFixed(1)
-				+ '" text-anchor="end" font-size="10" fill="var(--cl-muted)">'
-				+ common.formatRate(value) + '</text>';
+			grid += '<line x1="' + padX + '" y1="' + gy.toFixed(1)
+				+ '" x2="' + (width - padX) + '" y2="' + gy.toFixed(1)
+				+ '" stroke="var(--cl-rule)" stroke-width="1" stroke-dasharray="3 3"/>';
 		}
 
-		/* Three time labels: start, middle, end. More would collide at this size. */
-		function timeLabel(t) {
-			var d = new Date(t);
+		[4, 2, 0].forEach(function(step) {
+			var gy = y(ceiling * step / 4);
 
-			function pad(n) { return (n < 10) ? '0' + n : String(n); }
+			grid += '<text x="' + (padX + 2) + '" y="' + (gy - 4).toFixed(1)
+				+ '" font-size="10" fill="var(--cl-muted)">'
+				+ common.formatRate(ceiling * step / 4) + '</text>';
+		});
 
-			return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
-		}
-
-		var labels = '<text x="' + padLeft + '" y="' + (height - 8)
-			+ '" text-anchor="start" font-size="10" fill="var(--cl-muted)">' + timeLabel(t0) + '</text>'
-			+ '<text x="' + (padLeft + plotW / 2) + '" y="' + (height - 8)
-			+ '" text-anchor="middle" font-size="10" fill="var(--cl-muted)">' + timeLabel((t0 + t1) / 2) + '</text>'
-			+ '<text x="' + (width - padRight) + '" y="' + (height - 8)
-			+ '" text-anchor="end" font-size="10" fill="var(--cl-muted)">' + timeLabel(t1) + '</text>';
+		var lastUp = values[values.length - 1].up;
+		var lastDown = values[values.length - 1].down;
 
 		function esc(text) {
 			return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -300,18 +346,131 @@ return L.Class.extend({
 		var host = E('div');
 
 		host.innerHTML =
-			'<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" class="clients-chart__svg" role="img">'
+			'<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" class="clients-chart__svg"'
+			+ ' style="display:block;cursor:crosshair" role="img">'
 			+ '<title>' + esc(_('Traffic trend')) + '</title>'
 			+ '<desc>' + esc(_('Upload and download rates over the selected window.')) + '</desc>'
 			+ '<g>' + grid + '</g>'
-			+ '<g>' + labels + '</g>'
-			+ '<path d="' + path('up') + '" fill="none" stroke="var(--cl-up)" stroke-width="1.5"'
+			+ '<path d="' + line('up') + '" fill="none" stroke="var(--cl-up)" stroke-width="2"'
 			+ ' stroke-linejoin="round" stroke-linecap="round"/>'
-			+ '<path d="' + path('down') + '" fill="none" stroke="var(--cl-down)" stroke-width="1.5"'
+			+ '<path d="' + line('down') + '" fill="none" stroke="var(--cl-down)" stroke-width="2"'
 			+ ' stroke-linejoin="round" stroke-linecap="round"/>'
+			+ '<circle cx="' + x(t1).toFixed(1) + '" cy="' + y(lastUp).toFixed(1) + '" r="3" fill="var(--cl-up)"/>'
+			+ '<circle cx="' + x(t1).toFixed(1) + '" cy="' + y(lastDown).toFixed(1) + '" r="3" fill="var(--cl-down)"/>'
 			+ '</svg>';
 
-		dom.content(this.chart, [ host.firstChild ]);
+		var svg = host.firstChild;
+
+		/* The hover layer: a dashed crosshair snapped to the nearest sample,
+		 * one dot per series, and an HTML readout with the concrete values -
+		 * the same interaction the CPU usage history chart offers. HTML rather
+		 * than SVG text because the box is only measurable once rendered. The
+		 * svg node dies with the next poll, so the listeners never leak. */
+		var wrap = E('div', { 'style': 'position:relative' }, [ svg ]);
+
+		var tip = E('div', {
+			'style': 'position:absolute;display:none;z-index:3;pointer-events:none;min-width:8em;'
+				+ 'padding:.3em .5em;border:1px solid var(--cl-rule);border-radius:6px;'
+				+ 'background:var(--cl-surface);color:var(--cl-text);'
+				+ 'box-shadow:0 2px 8px rgba(15,23,42,.18);font-size:11px;line-height:1.5;'
+				+ 'font-variant-numeric:tabular-nums;text-align:left'
+		});
+		wrap.appendChild(tip);
+
+		function svgChild(tag, attrs) {
+			var el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+
+			for (var k in attrs)
+				el.setAttribute(k, attrs[k]);
+
+			return el;
+		}
+
+		var guide = svgChild('line', {
+			'x1': 0, 'x2': 0, 'y1': padTop, 'y2': padTop + plotH,
+			'stroke': 'var(--cl-muted)', 'stroke-width': '1', 'stroke-dasharray': '3 3',
+			'visibility': 'hidden'
+		});
+		svg.appendChild(guide);
+
+		var dotColors = [ 'var(--cl-up)', 'var(--cl-down)' ];
+		var dots = dotColors.map(function(color) {
+			var dot = svgChild('circle', {
+				'cx': 0, 'cy': 0, 'r': '3.5',
+				'fill': color, 'stroke': 'var(--cl-surface)', 'stroke-width': '1.5',
+				'visibility': 'hidden'
+			});
+			svg.appendChild(dot);
+			return dot;
+		});
+
+		var xs = points.map(function(point) { return x(point.t); });
+
+		function hide() {
+			tip.style.display = 'none';
+			guide.setAttribute('visibility', 'hidden');
+			dots.forEach(function(dot) { dot.setAttribute('visibility', 'hidden'); });
+		}
+
+		function show(evt) {
+			var p = chartPointer(svg, evt);
+
+			if (!p || !xs.length)
+				return;
+
+			var i = chartNearest(xs, p.x);
+			var v = values[i];
+
+			guide.setAttribute('x1', xs[i].toFixed(1));
+			guide.setAttribute('x2', xs[i].toFixed(1));
+			guide.setAttribute('visibility', 'visible');
+
+			[ [ v.up, y(v.up) ], [ v.down, y(v.down) ] ].forEach(function(c, d) {
+				dots[d].setAttribute('cx', xs[i].toFixed(1));
+				dots[d].setAttribute('cy', c[1].toFixed(1));
+				dots[d].setAttribute('visibility', 'visible');
+			});
+
+			tip.innerHTML = '';
+			tip.appendChild(E('div', {
+				'style': 'color:var(--cl-muted);font-weight:650;margin-bottom:2px'
+			}, fmtSampleClock(points[i].t)));
+
+			[ { label: _('Upload rate'), value: common.formatRate(v.up), color: dotColors[0] },
+			  { label: _('Download rate'), value: common.formatRate(v.down), color: dotColors[1] } ]
+			.forEach(function(row) {
+				tip.appendChild(E('div', {
+					'style': 'display:flex;align-items:center;gap:.4em;white-space:nowrap'
+				}, [
+					E('span', {
+						'style': 'width:.9em;height:2px;border-radius:2px;background:' + row.color + ';flex:0 0 auto'
+					}),
+					E('span', { 'style': 'color:var(--cl-muted)' }, row.label),
+					E('span', {
+						'style': 'margin-left:auto;padding-left:.6em;font-weight:700'
+					}, row.value)
+				]));
+			});
+
+			var wr = wrap.getBoundingClientRect();
+			var px = evt.clientX - wr.left, py = evt.clientY - wr.top;
+
+			tip.style.display = 'block';
+
+			var left = Math.min(Math.max(0, px - tip.offsetWidth / 2), Math.max(0, wr.width - tip.offsetWidth));
+			var top = py - tip.offsetHeight - 10;
+
+			if (top < 0)
+				top = py + 12;
+
+			tip.style.left = left + 'px';
+			tip.style.top = top + 'px';
+		}
+
+		svg.addEventListener('mousemove', show);
+		svg.addEventListener('mouseleave', hide);
+
+		dom.content(this.chart, [ wrap ]);
 	},
 
 	deviceOptions: function() {
