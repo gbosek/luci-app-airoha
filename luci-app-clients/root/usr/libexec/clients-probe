@@ -35,8 +35,9 @@
  *     "snoop6": [ { "mac": "E8:68:B1:36:F4:75", "ip": "2408:...", "fresh": true } ]
  *   }
  *
- * `names` maps MAC -> hostname from the lease file, the luci-rpc hints and
- * the DHCP Host-Name option heard on the bridge, in that priority.
+ * `names` maps MAC -> hostname from the lease file, the luci-rpc hints, the
+ * DHCP Host-Name option heard on the bridge and PTR reverse lookups against
+ * the DHCP server's DNS view, in that priority.
  *
  * Subcommands:
  *
@@ -1180,6 +1181,260 @@ function snoop_state() {
 	return { snoop4: snoop4, snoop6: snoop6, names: names };
 }
 
+/* ---------------- PTR hostnames ---------------- */
+
+/*
+ * The passive sources are slow by nature: the lease file only exists where
+ * this box runs dnsmasq, the Host-Name option only crosses the bridge when a
+ * client happens to renew. The one source that answers immediately is DNS
+ * itself - the DHCP server registers every lease it hands out under
+ * in-addr.arpa, so a reverse query for a client address returns its hostname
+ * whether the lease file lives here or on some upstream router.
+ *
+ * The answering server is remembered in the cache: a routed box asks its own
+ * dnsmasq (which binds the LAN address, not loopback, under local_service),
+ * an AP asks the upstream resolver from resolv.conf.auto - the device's own
+ * LAN addresses come first in the candidate list, so both shapes resolve to
+ * the right server without configuration. Everything is cached with a TTL
+ * (short for NXDOMAIN, so a client that later obtains a lease is noticed),
+ * and a run queries at most a handful of names: a busy table costs a few
+ * cycles, never a burst.
+ */
+const PTR_CACHE = '/tmp/clients-ptr.json';
+const PTR_TTL_POS = 6 * 3600;
+const PTR_TTL_NEG = 600;
+const PTR_QUERIES_PER_RUN = 8;
+
+function ptr_cache_load() {
+	let raw = read(PTR_CACHE);
+	let parsed = null;
+
+	if (length(raw))
+		try {
+			parsed = json(raw);
+		}
+		catch (e) {
+			parsed = null;
+		}
+
+	if (parsed == null || type(parsed) != 'object' || type(parsed.ptr) != 'object')
+		return { server: null, server_ts: 0, ptr: {} };
+
+	return parsed;
+}
+
+function ptr_cache_save(cache) {
+	let text = sprintf('%J\n', cache);
+
+	if (fs.writefile(PTR_CACHE + '.new', text) == length(text)) {
+		try {
+			fs.chmod(PTR_CACHE + '.new', 0600);
+		}
+		catch (e) {}
+
+		fs.rename(PTR_CACHE + '.new', PTR_CACHE);
+	}
+}
+
+/* Where to ask: the device's own LAN addresses first (that is where a local
+ * dnsmasq listens), then every non-loopback resolver the resolv files name. */
+function dns_servers(local) {
+	let list = [];
+
+	for (let ip in local)
+		if (match(ip, /^[0-9.]+$/) && index(list, ip) < 0)
+			push(list, ip);
+
+	let lines = split(read('/tmp/resolv.conf.d/resolv.conf.auto') + '\n' + read('/etc/resolv.conf'), '\n');
+
+	for (let line in lines) {
+		let ns = match(line, /^nameserver[ \t]+([0-9a-fA-F.:]+)/);
+
+		if (ns == null)
+			continue;
+
+		let server = ns[1];
+
+		if (match(server, /^127\.|^0\.0\.0\.0$|^255\.|^fe80/) || server == '::1')
+			continue;
+
+		if (index(list, server) < 0)
+			push(list, server);
+	}
+
+	return list;
+}
+
+function search_domains() {
+	let domains = [];
+	let lines = split(read('/tmp/resolv.conf.d/resolv.conf.auto') + '\n' + read('/etc/resolv.conf'), '\n');
+
+	for (let line in lines) {
+		let m = match(line, /^search[ \t]+(.+)$/);
+
+		if (m == null)
+			continue;
+
+		for (let d in split(trim(m[1]), /[ \t]+/))
+			if (match(d, /^[A-Za-z0-9._-]+$/) && index(domains, d) < 0)
+				push(domains, d);
+	}
+
+	return domains;
+}
+
+/* Strip the trailing dot and the search domain, then keep only names a page
+ * can print - tcpdump's escaping rule applies to DNS answers just the same. */
+function ptr_clean(text, domains) {
+	if (type(text) != 'string')
+		return null;
+
+	text = trim(text);
+
+	while (length(text) > 1 && substr(text, length(text) - 1) == '.')
+		text = substr(text, 0, length(text) - 1);
+
+	for (let d in domains) {
+		let suffix = '.' + d;
+
+		if (length(text) > length(suffix) && substr(text, length(text) - length(suffix)) == suffix)
+			text = substr(text, 0, length(text) - length(suffix));
+	}
+
+	let len = length(text);
+
+	if (len < 1 || len > 64)
+		return null;
+
+	for (let i = 0; i < len; i++) {
+		let code = ord(text, i);
+
+		if (code < 32 || code > 126 || code == 92)
+			return null;
+	}
+
+	return text;
+}
+
+/* One reverse query, walking the server candidates until one answers. A
+ * definitive NXDOMAIN is an answer too ('' = negative, cached briefly); a
+ * server that never replies is skipped and the remembered one is dropped. */
+function ptr_query(ip, servers, domains, cache) {
+	let start = 0;
+
+	for (let i = 0; i < length(servers); i++)
+		if (servers[i] == cache.server)
+			start = i;
+
+	for (let i = 0; i < length(servers); i++) {
+		let server = servers[(start + i) % length(servers)];
+		let out = run('timeout 3 nslookup ' + ip + ' ' + server + ' 2>/dev/null');
+		let ans = null;
+
+		if (out != null && length(out)) {
+			ans = match(out, /in-addr\.arpa[ \t]+name[ \t]*=[ \t]*([A-Za-z0-9._-]+)/) ??
+				match(out, /[ \t]name[ \t]*=[ \t]*([A-Za-z0-9._-]+)/);
+
+			if (ans == null && match(out, /NXDOMAIN/)) {
+				cache.server = server;
+				cache.server_ts = time();
+
+				return '';
+			}
+
+			if (ans != null) {
+				cache.server = server;
+				cache.server_ts = time();
+
+				return ptr_clean(ans[1], domains);
+			}
+		}
+	}
+
+	/* Nothing answered: forget the remembered server so the next query
+	 * starts from the top of the candidate list. */
+	cache.server = null;
+
+	return null;
+}
+
+/* Fill names the lease file, the hints and the wire left open, keyed through
+ * the address-to-MAC tables this snapshot already built. */
+function ptr_names(names, ipMac, candidates, local) {
+	if (!length(candidates))
+		return;
+
+	let servers = dns_servers(local);
+
+	if (!length(servers))
+		return;
+
+	let cache = ptr_cache_load();
+	let domains = search_domains();
+	let now = time();
+	let budget = PTR_QUERIES_PER_RUN;
+	let changed = false;
+
+	for (let ip in candidates) {
+		let mac = ipMac[ip];
+
+		if (mac == null || names[mac] != null)
+			continue;
+
+		let hit = cache.ptr[ip];
+		let name;
+
+		if (hit != null && type(hit.name) == 'string' &&
+		    (now - (int(hit.ts) ?? 0)) < ((hit.name == '') ? PTR_TTL_NEG : PTR_TTL_POS)) {
+			name = hit.name;
+		}
+		else if (budget > 0) {
+			budget--;
+
+			name = ptr_query(ip, servers, domains, cache);
+
+			if (name == null)
+				continue;
+
+			cache.ptr[ip] = { name: name, ts: now };
+			changed = true;
+		}
+		else {
+			continue;
+		}
+
+		if (name != '')
+			names[mac] = name;
+	}
+
+	/* The cache follows the same bound as the snoop tables. */
+	let ips = keys(cache.ptr);
+
+	while (length(ips) > 512) {
+		let oldest = null;
+		let oldest_at = 0;
+
+		for (let i = 0; i < length(ips); i++) {
+			let at = int(cache.ptr[ips[i]]?.ts) ?? 0;
+
+			if (oldest == null || at < oldest_at) {
+				oldest = ips[i];
+				oldest_at = at;
+			}
+		}
+
+		if (oldest == null)
+			break;
+
+		delete cache.ptr[oldest];
+		ips = keys(cache.ptr);
+		changed = true;
+	}
+
+	if (changed)
+		ptr_cache_save(cache);
+}
+
 function snapshot() {
 	let lan = lan_state();
 	let devices = device_names(lan.interfaces);
@@ -1200,6 +1455,28 @@ function snapshot() {
 	for (let mac, name in snoop?.names ?? {})
 		if (names[mac] == null)
 			names[mac] = name;
+
+	/* Last source, first answer: the DHCP server's own DNS view. Every
+	 * address this snapshot can pin to a MAC - ARP rows and heard DHCPACKs
+	 * alike - is worth one reverse query, and the result lands here the
+	 * same way, behind the other sources. */
+	let ipMac = {};
+
+	for (let entry in arp)
+		if (ipMac[entry.ip] == null)
+			ipMac[entry.ip] = entry.mac;
+
+	for (let entry in snoop?.snoop4 ?? [])
+		if (ipMac[entry.ip] == null)
+			ipMac[entry.ip] = entry.mac;
+
+	let candidates = [];
+
+	for (let ip in ipMac)
+		if (index(lan.local, ip) < 0)
+			push(candidates, ip);
+
+	ptr_names(names, ipMac, candidates, lan.local);
 
 	/* Every address ARP resolved belongs in the answer even with zero counters,
 	 * so the page can list a host that has not spoken yet. The scope sub-objects
