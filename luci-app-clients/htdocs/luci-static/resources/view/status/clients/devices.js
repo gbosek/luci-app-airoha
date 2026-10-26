@@ -245,7 +245,7 @@ return L.Class.extend({
 			E('td', {}, this.networkCell(entry)),
 			this.hasWifi ? E('td', {}, this.signalCell(entry)) : null,
 			E('td', { 'class': 'clients__num' }, this.trafficCell(entry, 'wan')),
-			E('td', { 'class': 'clients__num' }, common.formatCount(entry.conns)),
+			E('td', { 'class': 'clients__ctr' }, common.formatCount(entry.conns)),
 			E('td', { 'class': 'clients__seen', 'title': common.absoluteTime(entry.last) }, [
 				E('div', { 'class': 'clients__seen-last' }, seen),
 				entry.first ? E('div', { 'class': 'clients__seen-first' },
@@ -377,11 +377,15 @@ return L.Class.extend({
 		if (this.hasWifi)
 			head.push(this.headerCell(_('Signal'), 'signal'));
 
-		head.push(
-			this.headerCell(_('WAN') + ' (↑ / ↓)', 'wan', 'clients__num'),
-			this.headerCell(_('Connections'), 'conns', 'clients__num'),
-			this.headerCell(_('Last seen'), 'last')
-		);
+			head.push(
+				/* The rate column keeps the arrow suffix: the caption names what
+				 * moves, the arrows name which line is which. Connections is a
+				 * single short number per row - centring header and value makes
+				 * the pairing obvious without a ruler. */
+				this.headerCell(_('Live rate') + ' (↑ / ↓)', 'wan', 'clients__num'),
+				this.headerCell(_('Connections'), 'conns', 'clients__ctr'),
+				this.headerCell(_('Last seen'), 'last')
+			);
 
 		this.restoreWidths();
 

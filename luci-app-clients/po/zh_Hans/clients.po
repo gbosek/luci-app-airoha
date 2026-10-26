@@ -316,3 +316,6 @@ msgstr "广域网统计发往本网络之外地址的流量，本地主机之间
 
 msgid "This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port. The bracketed figures accumulate while this view is open."
 msgstr "本设备工作在桥接模式，流量取自硬件端口计数器：广域网为经上联端口的流量。括号内数字为本页面打开期间累计值。"
+
+msgid "Live rate"
+msgstr "实时速率"

@@ -318,3 +318,6 @@ msgstr ""
 
 msgid "This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port. The bracketed figures accumulate while this view is open."
 msgstr ""
+
+msgid "Live rate"
+msgstr ""

@@ -25,14 +25,15 @@
 	--cl-rule: #dee2e6;
 	--cl-text: #32325d;
 	--cl-muted: #8898aa;
-	/* IPv6 assignment source. Blue against orange survives the common
-	 * colour-vision deficiencies and projects; a blue/violet pair does not. */
-	--cl-ip6-dhcpv6: #1d4ed8;
-	--cl-ip6-slaac: #c2410c;
+	/* IPv6 assignment source. Blue against amber is the classic safe pair for
+	 * the common colour-vision deficiencies; the IPv4 trio below splits across
+	 * three far-apart hues (emerald / violet / rose) for the same reason. */
+	--cl-ip6-dhcpv6: #2563eb;
+	--cl-ip6-slaac: #d97706;
 	/* IPv4 assignment source: lease, reservation, hand-set. */
-	--cl-ip4-dhcp: #15803d;
-	--cl-ip4-static: #6d28d9;
-	--cl-ip4-manual: #be123c;
+	--cl-ip4-dhcp: #059669;
+	--cl-ip4-static: #7c3aed;
+	--cl-ip4-manual: #e11d48;
 	--cl-up: #c2410c;
 	--cl-down: #0f766e;
 }
@@ -44,11 +45,11 @@ html[data-argon-mode="dark"] {
 	--cl-rule: #3c3c3c;
 	--cl-text: #ccc;
 	--cl-muted: #a1a1aa;
-	--cl-ip6-dhcpv6: #8ab4ff;
-	--cl-ip6-slaac: #ffb27a;
-	--cl-ip4-dhcp: #6ee7a0;
-	--cl-ip4-static: #c4b5fd;
-	--cl-ip4-manual: #fda4af;
+	--cl-ip6-dhcpv6: #60a5fa;
+	--cl-ip6-slaac: #fbbf24;
+	--cl-ip4-dhcp: #34d399;
+	--cl-ip4-static: #a78bfa;
+	--cl-ip4-manual: #fb7185;
 	--cl-up: #ffb27a;
 	--cl-down: #5eead4;
 }
@@ -62,11 +63,11 @@ html[data-argon-mode="dark"] {
 		--cl-rule: #3c3c3c;
 		--cl-text: #ccc;
 		--cl-muted: #a1a1aa;
-		--cl-ip6-dhcpv6: #8ab4ff;
-		--cl-ip6-slaac: #ffb27a;
-		--cl-ip4-dhcp: #6ee7a0;
-		--cl-ip4-static: #c4b5fd;
-		--cl-ip4-manual: #fda4af;
+		--cl-ip6-dhcpv6: #60a5fa;
+		--cl-ip6-slaac: #fbbf24;
+		--cl-ip4-dhcp: #34d399;
+		--cl-ip4-static: #a78bfa;
+		--cl-ip4-manual: #fb7185;
 		--cl-up: #ffb27a;
 		--cl-down: #5eead4;
 	}
@@ -348,6 +349,13 @@ table.clients tr.clients__offline td {
 	white-space: nowrap;
 }
 
+/* The connection count is one short number per row: centred, header and
+ * value meet in the middle of the column and read as a pair. */
+.clients__ctr {
+	text-align: center;
+	white-space: nowrap;
+}
+
 .clients__name {
 	display: inline-block;
 	max-width: 100%;
@@ -388,8 +396,8 @@ table.clients tr.clients__offline td {
 
 .clients__ip4,
 .clients__ip6 {
-	padding-left: .35rem;
-	border-left: 2px solid transparent;
+	padding-left: .5rem;
+	border-left: 4px solid transparent;
 }
 
 .clients__ip4--dynamic  { border-left-color: var(--cl-ip4-dhcp); }
@@ -636,8 +644,8 @@ table.clients-dns tr.clients-dns__query-row td {
 
 .clients-legend {
 	display: inline-block;
-	padding-left: .4rem;
-	border-left: 2px solid transparent;
+	padding-left: .5rem;
+	border-left: 4px solid transparent;
 	font-size: .75rem;
 	color: var(--cl-text);
 }
