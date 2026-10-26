@@ -27,13 +27,15 @@
 	--cl-muted: #8898aa;
 	/* IPv6 assignment source. Blue against amber is the classic safe pair for
 	 * the common colour-vision deficiencies; the IPv4 trio below splits across
-	 * three far-apart hues (emerald / violet / rose) for the same reason. */
-	--cl-ip6-dhcpv6: #2563eb;
-	--cl-ip6-slaac: #d97706;
+	 * three far-apart hues (emerald / violet / rose) for the same reason.
+	 * The light-mode shades are the darker steps of each ramp: the same token
+	 * now colours the address text too, and small text needs the contrast. */
+	--cl-ip6-dhcpv6: #1d4ed8;
+	--cl-ip6-slaac: #b45309;
 	/* IPv4 assignment source: lease, reservation, hand-set. */
-	--cl-ip4-dhcp: #059669;
-	--cl-ip4-static: #7c3aed;
-	--cl-ip4-manual: #e11d48;
+	--cl-ip4-dhcp: #047857;
+	--cl-ip4-static: #6d28d9;
+	--cl-ip4-manual: #be123c;
 	--cl-up: #c2410c;
 	--cl-down: #0f766e;
 }
@@ -400,11 +402,11 @@ table.clients tr.clients__offline td {
 	border-left: 4px solid transparent;
 }
 
-.clients__ip4--dynamic  { border-left-color: var(--cl-ip4-dhcp); }
-.clients__ip4--static   { border-left-color: var(--cl-ip4-static); }
-.clients__ip4--manual   { border-left-color: var(--cl-ip4-manual); }
-.clients__ip6--dhcpv6   { border-left-color: var(--cl-ip6-dhcpv6); }
-.clients__ip6--slaac    { border-left-color: var(--cl-ip6-slaac); }
+.clients__ip4--dynamic  { border-left-color: var(--cl-ip4-dhcp); color: var(--cl-ip4-dhcp); }
+.clients__ip4--static   { border-left-color: var(--cl-ip4-static); color: var(--cl-ip4-static); }
+.clients__ip4--manual   { border-left-color: var(--cl-ip4-manual); color: var(--cl-ip4-manual); }
+.clients__ip6--dhcpv6   { border-left-color: var(--cl-ip6-dhcpv6); color: var(--cl-ip6-dhcpv6); }
+.clients__ip6--slaac    { border-left-color: var(--cl-ip6-slaac); color: var(--cl-ip6-slaac); }
 
 .clients__stale {
 	opacity: .5;
