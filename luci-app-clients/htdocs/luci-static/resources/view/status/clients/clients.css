@@ -354,8 +354,11 @@ table.clients tr.clients__offline td {
 /* The connection count is one short number per row, and the live-rate cell
  * stacks rate over session total: both are centred, header and value meet
  * on the column's middle axis. The traffic cell nests flex columns whose
- * children default to stretch-left, so each level opts back into centring. */
-.clients__ctr {
+ * children default to stretch-left, so each level opts back into centring.
+ * The header rule must out-specify `table.clients thead th` (text-align
+ * left), which is why the plain class is not enough on a <th>. */
+table.clients th.clients__ctr,
+table.clients td.clients__ctr {
 	text-align: center;
 	white-space: nowrap;
 }
