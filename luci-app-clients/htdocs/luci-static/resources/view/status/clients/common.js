@@ -806,31 +806,9 @@ function buildClients(state) {
 	});
 
 	/*
-	 * Long-term counters, joined last because they measure something else: the
-	 * whole accounting period (a month with the package default), not the
-	 * lifetime of the flows this page happened to observe. A row with no
-	 * nlbwmon entry keeps month = null and the column stays empty rather than
-	 * showing a zero that would read as "used nothing".
+	 * Resolve the network each client sits on: the live ARP row said which
+	 * device it arrived on; everything else is matched by subnet.
 	 */
-	var usage = state.nlbw || null;
-
-	if (usage) {
-		Object.keys(clients).forEach(function(id) {
-			var entry = clients[id];
-			var stored = entry.mac ? usage[entry.mac] : null;
-
-			if (!stored)
-				return;
-
-			entry.month = { up: stored.up || 0, down: stored.down || 0 };
-
-			if (stored.conns != null && entry.conns == null)
-				entry.conns = stored.conns;
-		});
-	}
-
-	/* Resolve the network each client sits on: the live ARP row said which
-	 * device it arrived on; everything else is matched by subnet. */
 	Object.keys(clients).forEach(function(id) {
 		var entry = clients[id];
 		var network = entry.device ? networks[entry.device] : null;
@@ -912,11 +890,6 @@ function sortValue(entry, key) {
 	case 'conns':
 		return (entry.conns == null) ? null : entry.conns;
 
-	case 'month':
-		if (!entry.month)
-			return null;
-		return entry.month.up + entry.month.down;
-
 	case 'last':
 		return entry.last || (entry.online ? Math.round(Date.now() / 1000) : null);
 	}
@@ -942,10 +915,6 @@ function createStore() {
 		archive: {},
 		archiveUpdated: 0,
 		trend: null,
-		nlbw: null,
-		nlbwAvailable: false,
-		nlbwPeriods: [],
-		lastNlbwLoad: 0,
 		lastLeaseLoad: 0,
 		lastHistoryLoad: 0,
 		state: {
@@ -1078,11 +1047,12 @@ function createStore() {
 				self.portRates = portRates;
 				self.portTotals = portTotals;
 
-				self.state.interfaces = data.interfaces || [];
-				self.state.arp = data.arp || [];
-				self.state.neigh6 = data.neigh6 || [];
-				self.state.wifi = data.wifi || {};
-				self.state.traffic = traffic;
+			self.state.interfaces = data.interfaces || [];
+			self.state.arp = data.arp || [];
+			self.state.neigh6 = data.neigh6 || [];
+			self.state.wifi = data.wifi || {};
+			self.state.wifiRadios = (data.wifi_radios != null) ? data.wifi_radios : null;
+			self.state.traffic = traffic;
 				self.state.stats = data.stats || null;
 				self.state.bridge = bridge;
 				self.state.snoop4 = Array.isArray(data.snoop4) ? data.snoop4 : [];
@@ -1174,35 +1144,6 @@ function createStore() {
 			});
 		},
 
-		/*
-		 * Long-term counters from nlbwmon, when it is installed. This is a
-		 * different measurement, not a refinement of the live one: nlbwmon sees
-		 * each stream at creation and at destruction, so its figures survive the
-		 * stream being reaped - which is exactly what the conntrack snapshot
-		 * cannot do. Read less often than the snapshot because the numbers move
-		 * on a monthly scale, not a five-second one.
-		 */
-		fetchNlbw: function() {
-			var self = this;
-
-			self.lastNlbwLoad = Date.now();
-
-			return L.resolveDefault(fs.exec_direct(PROBE, [ 'nlbw' ]), '').then(function(output) {
-				var data = null;
-
-				try {
-					data = output ? JSON.parse(output) : null;
-				}
-				catch (e) {
-					data = null;
-				}
-
-				self.nlbwAvailable = !!(data && data.available);
-				self.nlbwPeriods = (data && Array.isArray(data.periods)) ? data.periods : [];
-				self.nlbw = self.nlbwAvailable ? (data.hosts || {}) : null;
-			});
-		},
-
 		/* The merged rows, ready to render. */
 		clients: function() {
 			return buildClients({
@@ -1220,7 +1161,6 @@ function createStore() {
 				rates: this.rates || {},
 				totals: this.totals || {},
 				archive: this.archive,
-				nlbw: this.nlbw,
 				snoop4: this.state.snoop4,
 				snoop6: this.state.snoop6,
 				names: this.state.names

@@ -13,26 +13,20 @@ LUCI_TITLE:=LuCI Net Clients - addresses, traffic and DNS
 # and client IPv6 addresses. Without tcpdump the snoop daemon exits quietly
 # and the page falls back to what ARP sees.
 #
-# nlbwmon is a hard dependency on purpose: it is what turns the "This month"
-# column from an empty heading into a real period total, and the accounting
-# database only starts accumulating from the day it is installed - deferring the
-# install just delays the first usable month. The page still degrades gracefully
-# if the binary is missing (clients-probe reports available: false and the
-# column stays empty), so a stripped image that drops it will not break.
-LUCI_DEPENDS:=+luci-base +ucode +ucode-mod-fs +ucode-mod-ubus +rpcd-mod-iwinfo +nlbwmon
+# nlbwmon is deliberately NOT a dependency: the page no longer shows the
+# month column it used to feed, and the live WAN figures come from conntrack
+# accounting alone.
+LUCI_DEPENDS:=+luci-base +ucode +ucode-mod-fs +ucode-mod-ubus +rpcd-mod-iwinfo
 # Deliberately NOT a dependency: luci-app-bandix. Its per-device counters are
 # exact, but they only exist with the flow offload turned off, and on a PON
 # gateway that costs more throughput than the measurement is worth. Everything
 # this page shows is derived from conntrack accounting (which the driver keeps
 # updating for PPE-offloaded flows) plus dnsmasq's own query log.
 #
-# Also not a dependency, for the same reason: nlbwmon. It provides the
-# long-term (per accounting period) counters the live table cannot, because it
-# records each stream when it closes instead of sampling a table that forgets.
-# It is enabled in the image configs, but the page must keep working on an
-# image built without it - the month column simply stays empty.
+# Deliberately NOT a dependency, for the same reason: nlbwmon. Its per-period
+# counters were removed from the page, and nothing else reads them.
 LUCI_DESCRIPTION:=One place for every LAN client: addresses with their source, \
-	LAN/WAN traffic split, and the DNS lookups each device made.
+	WAN traffic, and the DNS lookups each device made.
 PKG_VERSION:=0.1.0
 PKG_RELEASE:=1
 

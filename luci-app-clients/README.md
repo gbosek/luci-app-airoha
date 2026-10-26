@@ -1,8 +1,8 @@
 # luci-app-clients
 
 One LuCI application for everything the router knows about the stations on its
-network: addresses, per-device traffic split between the LAN and the WAN, the
-wireless association each station had, and the DNS lookups it made.
+network: addresses, per-device WAN traffic, the wireless association each
+station had, and the DNS lookups it made.
 
 Menu entry: **Status → Net Clients** (`admin/status/clients`), sitting right
 after Airoha Soc (`order` 16).
@@ -11,8 +11,8 @@ Three tabs:
 
 | Tab | Answers |
 |---|---|
-| **Overview** | How much total traffic, split LAN / WAN, plus a live trend chart |
-| **Devices** | One row per client: addresses with their source, network, signal, LAN and WAN rates, this month's total, connections, last seen |
+| **Overview** | How much total traffic, plus a live trend chart |
+| **Devices** | One row per client: addresses with their source, network, WAN rate, connections, last seen (the Signal column only appears on devices with radios) |
 | **DNS** | Every lookup dnsmasq answered, with the device that asked and the server it went to |
 
 ## Dependencies
@@ -23,10 +23,6 @@ Declared in the Makefile, so a normal install pulls them in:
 |---|---|
 | `ucode`, `ucode-mod-fs`, `ucode-mod-ubus` | the two collector scripts |
 | `rpcd-mod-iwinfo` | the `iwinfo` ubus object the probe calls for association data |
-| `nlbwmon` | the "This month" counters; its database only starts accumulating the day it is installed |
-
-`nlbwmon` is a hard dependency but the page still degrades: if `/usr/sbin/nlbw`
-goes missing the month column stays empty and everything else keeps working.
 
 The vendor-icon bundle (`htdocs/.../resources/clients-oui/`, 501 KB, 67 files)
 ships inside this package. It used to live in luci-app-onu and this page merely
@@ -98,40 +94,19 @@ hook, `nft` limit/quota rules, and `tc` shaping. That is why this package does
 not offer rate limiting or per-device quotas - they cannot be made reliable
 without giving up the offload.
 
-## Long-term counters (nlbwmon)
+## Long-term counters (removed)
 
-The live columns are floors, because a conntrack byte count dies with its
-stream. Measured: five seconds of ordinary traffic retired enough rows to drop
-the table total by ~1.5 KB. A stream that opens and closes between two samples
-is invisible.
-
-`nlbwmon` solves this properly and is enabled in the image configs:
-
-```
-CONFIG_PACKAGE_nlbwmon=y
-```
-
-It listens on the conntrack netlink socket, so it sees each stream both when it
-is created and when it is destroyed, with the final counters attached, and it
-refreshes live streams every 30 s. Its default accounting period starts on the
-first of each month, which is the "This month" column in the devices table. It
-also works with the hardware offload on, for the same reason conntrack does.
-
-The page never requires it: `clients-probe nlbw` reports `available: false` when
-`/usr/sbin/nlbw` is missing and the column stays empty, with nothing else
-affected.
-
-**Flash note:** nlbwmon keeps its database in `/var/lib/nlbwmon` and commits
-every 24 h (`commit_interval`), so this is one write per day to flash - not
-per-poll. That is a deliberate exception to the "nothing here writes flash"
-rule above, and it is the price of a real period total.
+The page used to carry a "This month" column backed by `nlbwmon`. It was
+removed together with the per-device LAN column: the live WAN figures answer
+the question the table asks, and one fewer background counter is one fewer
+thing to configure. `nlbwmon` is no longer a dependency; the `clients-probe
+nlbw` query path is still present on the backend but nothing calls it.
 
 ## Two limits worth knowing
 
 1. **The live subtotals are floors, not lifetime totals.** conntrack counters
    belong to a flow; when the flow is reaped, its bytes leave the table with it.
-   The rate is accurate, the accumulated figure is "what this view saw". For a
-   real period total read the "This month" column, which comes from nlbwmon.
+   The rate is accurate, the accumulated figure is "what this view saw".
 2. **DNS records live in memory.** They survive a page reload but not a reboot.
    Logging every query costs a little CPU on a busy resolver. The package turns
    `log-queries` on at install time; `clients.dns.enabled=0` stops the collector

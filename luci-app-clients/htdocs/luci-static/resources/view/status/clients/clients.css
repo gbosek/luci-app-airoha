@@ -255,7 +255,7 @@ html[data-argon-mode="dark"] {
 
 table.clients {
 	width: 100%;
-	min-width: 68rem;
+	min-width: 56rem;
 	border-collapse: collapse;
 	table-layout: fixed;
 	font-variant-numeric: tabular-nums;
@@ -283,6 +283,38 @@ table.clients thead th:focus-visible {
 
 table.clients thead th.clients__sorted {
 	color: var(--cl-text);
+}
+
+/* The drag handle straddles the border between two headers: half of it
+ * belongs to either column, so the grab zone is centred on the rule the
+ * eye follows. The visible bar appears on hover, where the pointer already
+ * is. touch-action none keeps a touch drag from scrolling the card. */
+
+.clients__resizer {
+	position: absolute;
+	top: 0;
+	right: -5px;
+	width: 10px;
+	height: 100%;
+	cursor: col-resize;
+	z-index: 2;
+	touch-action: none;
+}
+
+.clients__resizer::after {
+	content: "";
+	position: absolute;
+	top: 25%;
+	bottom: 25%;
+	left: 4px;
+	width: 2px;
+	border-radius: 1px;
+	background: transparent;
+}
+
+.clients__resizer:hover::after,
+.clients__resizer:active::after {
+	background: var(--cl-muted);
 }
 
 .clients__arrow {
@@ -474,26 +506,25 @@ table.clients tr.clients__offline td {
 	color: var(--cl-muted);
 }
 
-/* ---------------- status dot ---------------- */
+/* ---------------- online/offline capsule ---------------- */
 
-.pon-state {
-	display: inline-flex;
-	align-items: center;
-	gap: .35rem;
-	white-space: nowrap;
-}
+/*
+ * A capsule instead of dot-plus-word: the state repeats on every row, the
+ * colour already says it, and the full word is the hover tooltip. The size
+ * is the largest shape that still reads as a status marker, not a button.
+ */
 
-.pon-dot {
+.clients__state {
 	display: inline-block;
-	width: 8px;
-	height: 8px;
-	border-radius: 50%;
-	flex: 0 0 auto;
-	background: var(--cl-muted);
+	width: 1.5rem;
+	height: .7rem;
+	border-radius: .35rem;
+	vertical-align: middle;
+	cursor: default;
 }
 
-.pon-dot[data-state="ok"] { background: #22c55e; }
-.pon-dot[data-state="error"] { background: #ef4444; }
+.clients__state--up { background: #22c55e; }
+.clients__state--down { background: #ef4444; }
 
 /* ---------------- DNS table ---------------- */
 
@@ -633,7 +664,7 @@ table.clients-dns tr.clients-dns__query-row td {
 
 @media (max-width: 720px) {
 	table.clients {
-		min-width: 56rem;
+		min-width: 48rem;
 	}
 
 	.clients-blocks {

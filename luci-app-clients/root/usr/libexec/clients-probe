@@ -11,6 +11,7 @@
  *   addresses   ARP + IPv6 neighbour cache          who is reachable now
  *   rates       nf_conntrack byte counters          how much traffic, coarse
  *   wifi        iwinfo assoclist                    which AP/SSID, signal
+ *   wifi_radios how many radios network.wireless has  has-WiFi flag
  *
  * No arguments prints a live snapshot and exits:
  *
@@ -636,10 +637,11 @@ function band_of(freq) {
 
 function wifi_state() {
 	let map = {};
+	let radios = 0;
 	let ubus = connect();
 
 	if (!ubus)
-		return map;
+		return [ map, radios ];
 
 	let status = null;
 
@@ -652,7 +654,7 @@ function wifi_state() {
 
 	if (!status) {
 		ubus.disconnect();
-		return map;
+		return [ map, radios ];
 	}
 
 	for (let radio in status) {
@@ -660,6 +662,11 @@ function wifi_state() {
 
 		if (!ifaces)
 			continue;
+
+		/* Counted before the per-interface work: a radio with an interface
+		 * exists whether or not anyone associates, and "no radios" is what
+		 * tells the devices page a Signal column can never mean anything. */
+		radios++;
 
 		for (let iface in ifaces) {
 			let ifname = iface?.ifname;
@@ -711,7 +718,7 @@ function wifi_state() {
 
 	ubus.disconnect();
 
-	return map;
+	return [ map, radios ];
 }
 
 /* ---------------- conntrack accounting ---------------- */
@@ -1444,6 +1451,8 @@ function snapshot(withPtr) {
 	let neigh6 = neighbour6(devices);
 	let hosts = traffic(all_subnets(lan.interfaces), lan.local);
 	let wifi = wifi_state();
+	let wifiMap = wifi[0];
+	let wifiRadios = wifi[1];
 	let leases = dhcp_leases();
 	let names = host_names(leases);
 	let snoop = snoop_state();
@@ -1542,7 +1551,8 @@ function snapshot(withPtr) {
 		interfaces: networks,
 		arp: arp,
 		neigh6: neigh6,
-		wifi: wifi,
+		wifi: wifiMap,
+		wifi_radios: wifiRadios,
 		names: names,
 		traffic: hosts,
 		stats: conntrack_stats(),

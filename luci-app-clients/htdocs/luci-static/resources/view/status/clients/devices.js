@@ -7,19 +7,21 @@
 'require view.status.clients.common as common';
 
 /*
- * Devices - one row per client, with the LAN and WAN halves of its traffic side
- * by side.
+ * Devices - one row per client, with its WAN traffic and connection count.
  *
- * The split is the reason this page exists in this shape. "This phone used
- * 300 MB" says nothing about whether it went to the internet (which costs
- * upstream bandwidth) or to the NAS in the next room (which does not). The
- * probe decides it from the far end of each flow and reports both halves;
- * this view only displays them.
+ * "This phone used 300 MB" says nothing about whether it went to the internet
+ * (which costs upstream bandwidth) or stayed inside the LAN (which does not);
+ * the WAN column answers the question that matters. The probe still computes
+ * the LAN half of every flow, but the table no longer shows it.
  *
  * Totals are session totals. conntrack accounting belongs to the flow, so when
  * a flow is reaped its byte count leaves this table with it - there is no
  * lifetime counter to read. The column header says so rather than implying a
  * precision the data does not have.
+ *
+ * The Signal column only exists on a device that owns radios (the probe
+ * reports how many it saw); on a wireless-less box the column would be an
+ * unbroken run of dashes.
  *
  * This is deliberately NOT a LuCI view module. L.require() instantiates every
  * class it loads, and instantiating a View takes over #view - spinner first,
@@ -28,12 +30,13 @@
  * plain class is inert on require(); clients.js mounts it into its pane.
  */
 
-var SORT_KEYS = [ 'state', 'hostname', 'ipv4', 'ipv6', 'mac', 'network', 'signal', 'lan', 'wan', 'month', 'conns', 'last' ];
+var SORT_KEYS = [ 'state', 'hostname', 'ipv4', 'ipv6', 'mac', 'network', 'signal', 'wan', 'conns', 'last' ];
 var SORT_STORAGE = 'clients.devices.sort';
+var WIDTH_STORAGE = 'clients.devices.widths';
 
-/* The long-term counters move on a monthly scale; polling them every five
- * seconds would buy nothing and cost one netlink round trip each time. */
-var NLBW_INTERVAL = 60;
+/* A column never shrinks below this; below it a header label would clip into
+ * the neighbour column's drag handle. */
+var MIN_COL_PX = 48;
 
 return L.Class.extend({
 	store: null,
@@ -56,8 +59,6 @@ return L.Class.extend({
 			return self.store.loadHistory();
 		}).then(function() {
 			return self.store.fetchLeases();
-		}).then(function() {
-			return self.store.fetchNlbw();
 		}).then(function() {
 			return self.store.fetchSnapshot();
 		});
@@ -119,6 +120,21 @@ return L.Class.extend({
 		}
 
 		return wrapper;
+	},
+
+	/* The online/offline capsule carries no inline text: a column of repeated
+	 * words is noise, and the state is already encoded in the colour and the
+	 * row's grey. The full word is a hover tooltip away, and the aria-label
+	 * keeps it answerable to a screen reader. */
+	stateCell: function(entry) {
+		var label = entry.online ? _('Online') : _('Offline');
+
+		return E('span', {
+			'class': 'clients__state clients__state--' + (entry.online ? 'up' : 'down'),
+			'role': 'img',
+			'title': label,
+			'aria-label': label
+		});
 	},
 
 	/* Where the client sits, in one column: a wireless row says which SSID and
@@ -215,56 +231,20 @@ return L.Class.extend({
 		]);
 	},
 
-	/*
-	 * The accounting period total from nlbwmon - the only figure here that
-	 * survives a stream being reaped, because nlbwmon sees the stream die and
-	 * keeps its final counters. Empty when nlbwmon is not installed; the header
-	 * says which period it covers so an empty column is not read as "zero".
-	 */
-	monthCell: function(entry) {
-		if (!entry.month)
-			return E('span', {
-				'class': 'clients__muted',
-				'title': _('Long-term counters need the nlbwmon package')
-			}, '-');
-
-		return E('div', { 'class': 'clients__traffic' }, [
-			E('div', { 'class': 'clients__traffic-rate' }, [
-				E('span', { 'class': 'clients__traffic-up' }, [
-					E('span', { 'class': 'clients__dir', 'aria-hidden': 'true' }, '↑'), ' ',
-					common.formatSize(entry.month.up)
-				]),
-				E('span', { 'class': 'clients__traffic-down' }, [
-					E('span', { 'class': 'clients__dir', 'aria-hidden': 'true' }, '↓'), ' ',
-					common.formatSize(entry.month.down)
-				])
-			])
-		]);
-	},
-
 	renderRow: function(entry) {
 		var seen = entry.online
 			? _('now')
 			: (common.relativeTime(entry.last) || '-');
 
 		return E('tr', { 'class': entry.online ? null : 'clients__offline' }, [
-			E('td', {}, E('span', { 'class': 'pon-state' }, [
-				E('span', {
-					'class': 'pon-dot',
-					'data-state': entry.online ? 'ok' : 'error',
-					'aria-hidden': 'true'
-				}),
-				entry.online ? _('Online') : _('Offline')
-			])),
+			E('td', {}, this.stateCell(entry)),
 			E('td', { 'class': 'clients__host' }, this.hostnameCell(entry)),
 			E('td', {}, this.addressCell(entry.ipv4, 'clients__addr', true)),
 			E('td', {}, this.addressCell(entry.ipv6, 'clients__ip6', false)),
 			E('td', { 'class': 'clients__addr' }, entry.mac || '-'),
 			E('td', {}, this.networkCell(entry)),
-			E('td', {}, this.signalCell(entry)),
-			E('td', { 'class': 'clients__num' }, this.trafficCell(entry, 'lan')),
+			this.hasWifi ? E('td', {}, this.signalCell(entry)) : null,
 			E('td', { 'class': 'clients__num' }, this.trafficCell(entry, 'wan')),
-			E('td', { 'class': 'clients__num' }, this.monthCell(entry)),
 			E('td', { 'class': 'clients__num' }, common.formatCount(entry.conns)),
 			E('td', { 'class': 'clients__seen', 'title': common.absoluteTime(entry.last) }, [
 				E('div', { 'class': 'clients__seen-last' }, seen),
@@ -275,7 +255,10 @@ return L.Class.extend({
 	},
 
 	/* A sortable header: the whole cell is the control, so it also responds to
-	 * Enter and Space and carries aria-sort for screen readers. */
+	 * Enter and Space and carries aria-sort for screen readers. The arrow is
+	 * rendered only while the column is sorted: a permanent empty span would
+	 * push every header label one arrow-width off its values, which is most
+	 * visible on the single-number Connections column. */
 	headerCell: function(label, key, className) {
 		var active = (this.sort.key == key);
 		var classes = [ className || '', active ? 'clients__sorted' : '' ];
@@ -290,13 +273,95 @@ return L.Class.extend({
 			'click': ui.createHandlerFn(this, 'handleSort', key)
 		}, [
 			label,
-			E('span', { 'class': 'clients__arrow', 'aria-hidden': 'true' },
-				active ? (this.sort.desc ? '▼' : '▲') : '')
+			active ? E('span', { 'class': 'clients__arrow', 'aria-hidden': 'true' },
+				this.sort.desc ? '▼' : '▲') : null
 		]);
 
 		cell.addEventListener('keydown', ui.createHandlerFn(this, 'handleSortKey', key));
 
 		return cell;
+	},
+
+	/* Default column widths, one per column including Signal only when this
+	 * box owns radios. The layout is fixed because automatic sizing picks the
+	 * widest IPv6 hextet and pushes the counters out of the card; the drag
+	 * handles let a viewer override each width, and the choice persists. */
+	DEFAULT_WIDTHS_FULL: [ '3rem', '7.5rem', '7.5rem', '9.5rem', '9rem', '7.5rem',
+		'4.75rem', '7.5rem', '5rem', '6.5rem' ],
+	DEFAULT_WIDTHS_NOWIFI: [ '3rem', '7.5rem', '7.5rem', '9.5rem', '9rem', '7.5rem',
+		'7.5rem', '5rem', '6.5rem' ],
+
+	restoreWidths: function() {
+		var defaults = this.hasWifi ? this.DEFAULT_WIDTHS_FULL : this.DEFAULT_WIDTHS_NOWIFI;
+		var stored = null;
+
+		try {
+			stored = JSON.parse(window.localStorage.getItem(WIDTH_STORAGE) || 'null');
+		}
+		catch (e) {
+			stored = null;
+		}
+
+		/* A stored row only fits the column count it was dragged on; anything
+		 * else (an upgrade, a different box) falls back to the defaults. */
+		this.widths = (Array.isArray(stored) && stored.length == defaults.length)
+			? stored : defaults.slice();
+	},
+
+	saveWidths: function() {
+		try {
+			window.localStorage.setItem(WIDTH_STORAGE, JSON.stringify(this.widths));
+		}
+		catch (e) {
+			/* Private mode / quota: the choice simply does not persist. */
+		}
+	},
+
+	/* A drag handle at the right edge of every header cell. Pointer events
+	 * keep the maths identical for mouse and touch; the handle swallows its
+	 * own click so finishing a drag on it never sorts the column, and the
+	 * live widths land in the colgroup, where the fixed layout applies them
+	 * to every row at once. */
+	attachResizers: function(headCells) {
+		var self = this;
+		var cols = this.colEls;
+
+		headCells.forEach(function(cell, index) {
+			var handle = E('span', { 'class': 'clients__resizer', 'aria-hidden': 'true' });
+
+			handle.addEventListener('click', function(ev) { ev.stopPropagation(); });
+			handle.addEventListener('pointerdown', function(ev) {
+				ev.preventDefault();
+				ev.stopPropagation();
+
+				var startX = ev.clientX;
+				var startW = cell.getBoundingClientRect().width;
+				var moved = false;
+
+				function onMove(e) {
+					var width = Math.max(MIN_COL_PX, startW + e.clientX - startX);
+
+					if (Math.abs(width - startW) > 2)
+						moved = true;
+
+					self.widths[index] = width + 'px';
+					cols[index].style.width = width + 'px';
+				}
+
+				function onUp() {
+					document.removeEventListener('pointermove', onMove);
+					document.removeEventListener('pointerup', onUp);
+
+					if (moved)
+						self.saveWidths();
+				}
+
+				document.addEventListener('pointermove', onMove);
+				document.addEventListener('pointerup', onUp);
+			});
+
+			cell.appendChild(handle);
+		});
 	},
 
 	buildTable: function(clients) {
@@ -306,14 +371,28 @@ return L.Class.extend({
 			this.headerCell(_('IPv4 address'), 'ipv4'),
 			this.headerCell(_('IPv6 address'), 'ipv6'),
 			this.headerCell(_('MAC address'), 'mac'),
-			this.headerCell(_('Network'), 'network'),
-			this.headerCell(_('Signal'), 'signal'),
-			this.headerCell(_('LAN') + ' (↑ / ↓)', 'lan', 'clients__num'),
+			this.headerCell(_('Network'), 'network')
+		];
+
+		if (this.hasWifi)
+			head.push(this.headerCell(_('Signal'), 'signal'));
+
+		head.push(
 			this.headerCell(_('WAN') + ' (↑ / ↓)', 'wan', 'clients__num'),
-			this.headerCell(_('This month') + ' (↑ / ↓)', 'month', 'clients__num'),
 			this.headerCell(_('Connections'), 'conns', 'clients__num'),
 			this.headerCell(_('Last seen'), 'last')
-		];
+		);
+
+		this.restoreWidths();
+
+		var colgroup = E('colgroup', {}, this.widths.map(function(width) {
+			return E('col', { 'style': 'width:' + width });
+		}));
+
+		/* childNodes is live, but dom.content() rebuilds the table every poll;
+		 * the copy is taken while the nodes exist. */
+		this.colEls = Array.prototype.slice.call(colgroup.childNodes);
+		this.attachResizers(head);
 
 		this.activeAddresses = Object.create(null);
 		(this.store.state.arp || []).forEach(L.bind(function(neighbour) {
@@ -329,13 +408,8 @@ return L.Class.extend({
 
 		/* Fixed widths, because automatic layout sizes the IPv6 column by its
 		 * widest hextet and then pushes the counters out of the card. */
-		var widths = [ '4.5rem', '7.5rem', '7.5rem', '9.5rem', '9rem', '7.5rem',
-			'4.75rem', '7.5rem', '7.5rem', '7rem', '5rem', '6.5rem' ];
-
 		return E('table', { 'class': 'clients' }, [
-			E('colgroup', {}, widths.map(function(width) {
-				return E('col', { 'style': 'width:' + width });
-			})),
+			colgroup,
 			E('thead', {}, E('tr', {}, head)),
 			E('tbody', {}, body)
 		]);
@@ -435,6 +509,7 @@ return L.Class.extend({
 		this.store.state.ip6Source = this.ip6Source;
 		this.store.state.ip4Source = this.ip4Source;
 
+		this.hasWifi = ((this.store.state.wifiRadios || 0) > 0);
 		var clients = this.store.clients();
 
 		this.reserved4 = this.store.state.reserved4;
@@ -483,9 +558,6 @@ return L.Class.extend({
 			if ((Date.now() - this.store.lastHistoryLoad) >= common.HISTORY_INTERVAL * 1000)
 				jobs.push(this.store.loadHistory());
 
-			if ((Date.now() - (this.store.lastNlbwLoad || 0)) >= NLBW_INTERVAL * 1000)
-				jobs.push(this.store.fetchNlbw());
-
 			return Promise.all(jobs).then(function() {
 				self.updateTable();
 			}).catch(function(error) {
@@ -496,8 +568,8 @@ return L.Class.extend({
 		}, this), common.SAMPLE_INTERVAL);
 
 		return E('div', { 'class': 'clients-pane' }, [
-			E('div', { 'class': 'cbi-map-descr' },
-				_('Every station this device can see, with its addresses, the network it sits on, and its traffic split between the LAN and the WAN.')),
+		E('div', { 'class': 'cbi-map-descr' },
+			_('Every station this device can see, with its addresses, the network it sits on, and its WAN traffic.')),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, [
 					_('Known clients'),
@@ -510,17 +582,15 @@ return L.Class.extend({
 						E('span', { 'class': 'clients-legend clients-legend--ip4-static' }, _('Static lease')),
 						E('span', { 'class': 'clients-legend clients-legend--ip4-manual' }, _('Manual')),
 						E('span', { 'class': 'clients-legend clients-legend--ip6-dhcpv6' }, 'DHCPv6'),
-						E('span', { 'class': 'clients-legend clients-legend--ip6-slaac' }, 'SLAAC'),
-						E('span', { 'class': 'clients-footer__text' },
-							_('addresses are coloured by who assigned them'))
-					]),
-					E('p', { 'class': 'clients-note' },
-						_('LAN counts traffic to other addresses inside this network; WAN counts everything else. Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows.')),
-					E('p', { 'class': 'clients-note' },
-						_('The subtotals are what this view has seen since it was opened. conntrack counters belong to a flow, so a flow that ends takes its bytes with it - treat the figure as a floor, not a lifetime total.')),
-					E('p', { 'class': 'clients-note' },
-						_('The month column comes from nlbwmon, which records every stream when it closes and therefore can give a real period total. It requires the nlbwmon package; without it the column stays empty and nothing else changes.'))
-				])
+					E('span', { 'class': 'clients-legend clients-legend--ip6-slaac' }, 'SLAAC'),
+					E('span', { 'class': 'clients-footer__text' },
+						_('addresses are coloured by who assigned them'))
+				]),
+				E('p', { 'class': 'clients-note' },
+					_('WAN counts traffic to addresses outside this network; traffic between local hosts is not shown. Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows.')),
+				E('p', { 'class': 'clients-note' },
+					_('The subtotals are what this view has seen since it was opened. conntrack counters belong to a flow, so a flow that ends takes its bytes with it - treat the figure as a floor, not a lifetime total.'))
+			])
 			])
 		]);
 	}

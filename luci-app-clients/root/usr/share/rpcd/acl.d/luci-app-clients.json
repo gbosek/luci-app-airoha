@@ -11,8 +11,6 @@
 			},
 			"file": {
 				"/usr/libexec/clients-probe": [ "exec" ],
-				"/usr/libexec/clients-probe nlbw": [ "exec" ],
-				"/usr/libexec/clients-probe nlbw *": [ "exec" ],
 				"/usr/libexec/clients-probe read *": [ "exec" ],
 				"/usr/libexec/clients-probe status *": [ "exec" ],
 				"/usr/libexec/clients-dns read": [ "exec" ],

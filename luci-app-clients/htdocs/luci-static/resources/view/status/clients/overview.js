@@ -37,7 +37,6 @@ var WINDOWS = [
 
 var TYPES = [
 	{ value: 'total', label: _('Total') },
-	{ value: 'lan', label: _('LAN') },
 	{ value: 'wan', label: _('WAN') }
 ];
 
@@ -152,8 +151,6 @@ return L.Class.extend({
 		var totalDownBytes = summary.lanTotalDown + summary.wanTotalDown;
 
 		dom.content(this.summary, [
-			block(_('LAN traffic'), summary.lanUp, summary.lanDown,
-				summary.lanTotalUp, summary.lanTotalDown),
 			block(_('WAN traffic'), summary.wanUp, summary.wanDown,
 				summary.wanTotalUp, summary.wanTotalDown),
 			block(_('Total'), totalUp, totalDown, totalUpBytes, totalDownBytes),
@@ -198,13 +195,10 @@ return L.Class.extend({
 					return { up: 0, down: 0 };
 			}
 
-			if (type == 'lan')
-				return { up: source.lanUp || 0, down: source.lanDown || 0 };
+		if (type == 'wan')
+			return { up: source.wanUp || 0, down: source.wanDown || 0 };
 
-			if (type == 'wan')
-				return { up: source.wanUp || 0, down: source.wanDown || 0 };
-
-			return {
+		return {
 				up: (source.lanUp || 0) + (source.wanUp || 0),
 				down: (source.lanDown || 0) + (source.wanDown || 0)
 			};
@@ -448,7 +442,7 @@ return L.Class.extend({
 			this.chart,
 			E('p', { 'class': 'clients-note' },
 				bridgeMode
-					? _('This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port, LAN is what moved between the clients attached here. The bracketed figures accumulate while this view is open.')
+					? _('This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port. The bracketed figures accumulate while this view is open.')
 					: _('Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are what this view has seen while it was open - conntrack counters belong to a flow, so they are a floor, not a lifetime total.'))
 		])
 	]);

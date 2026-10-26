@@ -307,3 +307,12 @@ msgstr "长期统计需安装 nlbwmon 软件包"
 
 msgid "The month column comes from nlbwmon, which records every stream when it closes and therefore can give a real period total. It requires the nlbwmon package; without it the column stays empty and nothing else changes."
 msgstr "“本月”列来自 nlbwmon：它在每条连接关闭时记录最终字节数，因此能给出真实的周期总量。该列需要安装 nlbwmon，未安装时整列为空，其余功能不受影响。"
+
+msgid "Every station this device can see, with its addresses, the network it sits on, and its WAN traffic."
+msgstr "本设备可见的所有终端：地址、所属网络，以及广域网流量。"
+
+msgid "WAN counts traffic to addresses outside this network; traffic between local hosts is not shown. Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows."
+msgstr "广域网统计发往本网络之外地址的流量，本地主机之间的流量不显示。速率由内核 conntrack 计数器差分得出，硬件卸载的连接同样计数。"
+
+msgid "This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port. The bracketed figures accumulate while this view is open."
+msgstr "本设备工作在桥接模式，流量取自硬件端口计数器：广域网为经上联端口的流量。括号内数字为本页面打开期间累计值。"

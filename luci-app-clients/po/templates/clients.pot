@@ -309,3 +309,12 @@ msgstr ""
 msgid "The month column comes from nlbwmon, which records every stream when it closes and therefore can give a real period total. It requires the nlbwmon package; without it the column stays empty and nothing else changes."
 msgstr ""
 
+
+msgid "Every station this device can see, with its addresses, the network it sits on, and its WAN traffic."
+msgstr ""
+
+msgid "WAN counts traffic to addresses outside this network; traffic between local hosts is not shown. Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows."
+msgstr ""
+
+msgid "This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port. The bracketed figures accumulate while this view is open."
+msgstr ""
