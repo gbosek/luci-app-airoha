@@ -301,7 +301,24 @@ return view.extend({
 		]);
 	},
 
+	/* Pre-fill the LAN IP with the address the target mode will be reached at:
+	 * going to AP the useful hint is the upstream address this WAN port already
+	 * obtained (same subnet after bridging); coming back to router mode the
+	 * device falls back to its own gateway, 192.168.50.1. */
+	prefillLanIp: function(target) {
+		if (!this.lanIpInput) return;
+		var current = (this.status && this.status.mode) || 'unknown';
+		if (target === 'ap') {
+			if (current !== 'ap')
+				this.lanIpInput.value = (this.status && this.status.wan_ip) || '';
+		} else if (current === 'ap') {
+			this.lanIpInput.value = '192.168.50.1';
+		}
+	},
+
 	confirmMode: function(mode, title) {
+		this.prefillLanIp(mode);
+
 		var summary = ({
 			ap: _('The WAN port joins br-lan; this device takes an address from the upstream router and disables DHCP.'),
 			dhcp: _('The WAN port obtains an upstream address automatically; the LAN uses a static address with DHCP enabled.'),
