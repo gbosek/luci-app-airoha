@@ -35,9 +35,10 @@
  *     "snoop6": [ { "mac": "E8:68:B1:36:F4:75", "ip": "2408:...", "fresh": true } ]
  *   }
  *
- * `names` maps MAC -> hostname from the lease file, the luci-rpc hints, the
- * DHCP Host-Name option heard on the bridge and PTR reverse lookups against
- * the DHCP server's DNS view, in that priority.
+ * `names` maps MAC -> hostname from the lease file, the luci-rpc hints and
+ * the DHCP Host-Name option heard on the bridge, in that priority. On a
+ * routed box one final PTR pass asks the local dnsmasq; a bridging device
+ * (AP mode) never queries anything.
  *
  * Subcommands:
  *
@@ -1186,19 +1187,19 @@ function snoop_state() {
 /*
  * The passive sources are slow by nature: the lease file only exists where
  * this box runs dnsmasq, the Host-Name option only crosses the bridge when a
- * client happens to renew. The one source that answers immediately is DNS
- * itself - the DHCP server registers every lease it hands out under
- * in-addr.arpa, so a reverse query for a client address returns its hostname
- * whether the lease file lives here or on some upstream router.
+ * client happens to renew. On a routed box the one source that answers
+ * immediately is DNS itself - this box's own dnsmasq registers every lease
+ * it hands out under in-addr.arpa, so a reverse query for a client address
+ * returns its hostname.
  *
- * The answering server is remembered in the cache: a routed box asks its own
- * dnsmasq (which binds the LAN address, not loopback, under local_service),
- * an AP asks the upstream resolver from resolv.conf.auto - the device's own
- * LAN addresses come first in the candidate list, so both shapes resolve to
- * the right server without configuration. Everything is cached with a TTL
- * (short for NXDOMAIN, so a client that later obtains a lease is noticed),
- * and a run queries at most a handful of names: a busy table costs a few
- * cycles, never a burst.
+ * The whole pass is skipped on a bridging device (AP mode): there the
+ * answering server would be the upstream router, and an AP does not get to
+ * ask the network for names - it only listens. On a router the device's own
+ * LAN addresses come first in the candidate list, so the queries stay local
+ * even when resolv.conf.auto names upstream resolvers as fallback.
+ * Everything is cached with a TTL (short for NXDOMAIN, so a client that
+ * later obtains a lease is noticed), and a run queries at most a handful of
+ * names: a busy table costs a few cycles, never a burst.
  */
 const PTR_CACHE = '/tmp/clients-ptr.json';
 const PTR_TTL_POS = 6 * 3600;
@@ -1456,10 +1457,11 @@ function snapshot() {
 		if (names[mac] == null)
 			names[mac] = name;
 
-	/* Last source, first answer: the DHCP server's own DNS view. Every
-	 * address this snapshot can pin to a MAC - ARP rows and heard DHCPACKs
-	 * alike - is worth one reverse query, and the result lands here the
-	 * same way, behind the other sources. */
+	/* Last source, first answer - routed boxes only. On a bridging device
+	 * (AP mode) the answering server would be the upstream router, and an
+	 * AP does not ask the network for names: it listens to the wire (the
+	 * DHCP Host-Name option above) and accepts what it hears. Skipping the
+	 * pass also saves the nslookup subprocesses entirely. */
 	let ipMac = {};
 
 	for (let entry in arp)
@@ -1476,7 +1478,8 @@ function snapshot() {
 		if (index(lan.local, ip) < 0)
 			push(candidates, ip);
 
-	ptr_names(names, ipMac, candidates, lan.local);
+	if (!bridge.mode)
+		ptr_names(names, ipMac, candidates, lan.local);
 
 	/* Every address ARP resolved belongs in the answer even with zero counters,
 	 * so the page can list a host that has not spoken yet. The scope sub-objects
