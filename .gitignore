@@ -1,3 +1,6 @@
 # Local assistant workspace: project memory, scratch scripts, captured
 # screenshots. Never part of the published feed.
 .workbuddy/
+# Local test harness of the clients app: captured snapshots contain real
+# client MACs and addresses, and node_modules must not enter the tree
+/luci-app-clients/.test/

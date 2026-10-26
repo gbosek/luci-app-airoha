@@ -1,0 +1,445 @@
+#!/usr/bin/ucode
+// SPDX-License-Identifier: Apache-2.0
+'use strict';
+
+/*
+ * clients-snoop - what a bridging device can learn by listening.
+ *
+ * When this box is an AP (or any L2 bridge) the usual sources of truth are
+ * gone: dnsmasq does not hand out the addresses, odhcpd does not run DHCPv6,
+ * and the kernel never resolves a client's global IPv6 address because the
+ * box itself has none - so `ip -6 neigh` only ever lists the upstream
+ * routers. The page would show every IPv6 column empty and colour no IPv4
+ * address, even though everything the page wants to know crosses the bridge
+ * in plain sight:
+ *
+ *   DHCPACK    the upstream server assigning an IPv4 address, with the
+ *              client's hardware address in the payload
+ *   NS (::)    the duplicate-address probe every freshly configured IPv6
+ *              address sends - the sender owns the target
+ *   NA         a host announcing one of its own addresses
+ *
+ * This daemon runs tcpdump on the LAN bridges, reduces that traffic to
+ * mac -> address facts and keeps them in /tmp/clients-snoop.json, which the
+ * probe folds into its snapshot. It is best-effort by design: without
+ * tcpdump the daemon exits and the page degrades to what ARP can see.
+ *
+ * Filtering happens in the kernel (BPF): the capture only lifts DHCPv4 and
+ * ICMPv6 ND packets out of the bridge, so a busy network costs nothing
+ * measurable. Only solicited-node multicast and unicast NS/NA plus DHCPv4
+ * packets match; ordinary data frames never reach this process.
+ *
+ * tcpdump prints one packet as a header line starting with a timestamp plus
+ * continuation lines indented by whitespace. The parser is tolerant about
+ * field names because they moved between releases: "yiaddr" became
+ * "Your-IP", and the message type is either "type 5" on the header line or
+ * "DHCP-Message (53), length 1: ACK" among the options.
+ *
+ * The dual-form BPF expression is deliberate. A frame inside this bridge is
+ * 802.1Q-tagged, and libpcap only shifts the offsets past the tag for the
+ * branch that says `vlan` - a plain `udp port 67` misses every tagged DHCP
+ * frame, verified on the target. Both forms together match tagged and
+ * untagged frames; the parentheses around the icmp6 term matter, an
+ * unparenthesised mix silently drops the DHCP branch.
+ */
+
+let fs = require('fs');
+
+const TCPDUMP = '/usr/bin/tcpdump';
+const OUT = '/tmp/clients-snoop.json';
+
+/* The filter. Both tagged and untagged forms, see the header comment. */
+const CAPTURE =
+	'(udp port 67 or udp port 68 or (icmp6 and (icmp6[0] == 135 or icmp6[0] == 136)))' +
+	' or (vlan and (udp port 67 or udp port 68 or (icmp6 and (icmp6[0] == 135 or icmp6[0] == 136))))';
+
+/* A rewrite costs one 4 KiB tmpfile rename; even a chatty ND network stays
+ * far below one packet per second, so flushing every packet is harmless. The
+ * minimum interval only guards against a pathological burst. */
+const FLUSH_MIN = 2;
+
+/* Bound the file: an AP that has seen thousands of guests must not grow an
+ * unbounded table. Entries are dropped oldest-first. */
+const MAX_HOSTS = 512;
+const MAX_V6 = 6;
+
+const MAC_RX = /^([0-9a-f]{2}(:[0-9a-f]{2}){5})$/;
+const IP4_RX = /^([0-9]{1,3}(\.[0-9]{1,3}){3})$/;
+
+let data = { updated: 0, dhcp4: {}, hosts6: {} };
+let dirty = false;
+let lastFlush = 0;
+
+/* ---------------- small helpers ---------------- */
+
+function run(cmd) {
+	let handle = fs.popen(cmd);
+	let out;
+
+	if (!handle)
+		return '';
+
+	try {
+		out = handle.read('all');
+	}
+	catch (e) {
+		out = null;
+	}
+
+	handle.close();
+
+	return out ?? '';
+}
+
+function read_text(path) {
+	try {
+		return fs.readfile(path) ?? '';
+	}
+	catch (e) {
+		return '';
+	}
+}
+
+function valid_mac(text) {
+	if (type(text) != 'string' || !match(lc(text), MAC_RX))
+		return null;
+
+	return uc(text);
+}
+
+function valid_ip4(text) {
+	if (type(text) != 'string' || !match(text, IP4_RX))
+		return null;
+
+	/* A dotted quad with a component above 255 is not an address. */
+	for (let part in split(text, '.'))
+		if (int(part) > 255)
+			return null;
+
+	return text;
+}
+
+function valid_ip6(text) {
+	if (type(text) != 'string' || index(text, ':') < 0)
+		return null;
+
+	text = lc(text);
+
+	/* Link-locals say nothing the page wants to show, and multicast targets
+	 * are never a host's own address. The unspecified address is noise too. */
+	if (match(text, /^fe80[0-9a-f:]*$/) || match(text, /^ff[0-9a-f:]*$/) || text == '::')
+		return null;
+
+	return text;
+}
+
+/* ---------------- storage ---------------- */
+
+function load() {
+	let raw = '';
+
+	try {
+		raw = fs.readfile(OUT) ?? '';
+	}
+	catch (e) {
+		raw = '';
+	}
+
+	if (!length(raw))
+		return;
+
+	let parsed = null;
+
+	try {
+		parsed = json(raw);
+	}
+	catch (e) {
+		parsed = null;
+	}
+
+	if (parsed == null || type(parsed.dhcp4) != 'object' || type(parsed.hosts6) != 'object')
+		return;
+
+	data = parsed;
+}
+
+function flush(force) {
+	if (!dirty || (!force && (time() - lastFlush) < FLUSH_MIN))
+		return;
+
+	data.updated = time();
+
+	let text = sprintf('%J\n', data);
+
+	if (fs.writefile(OUT + '.new', text) == length(text)) {
+		try {
+			fs.chmod(OUT + '.new', 0600);
+		}
+		catch (e) {}
+
+		fs.rename(OUT + '.new', OUT);
+	}
+
+	dirty = false;
+	lastFlush = time();
+}
+
+/* ---------------- records ---------------- */
+
+/* One of the tables grew past its bound: drop the oldest entry. */
+function trim_hosts(table) {
+	let names = keys(table);
+
+	while (length(names) > MAX_HOSTS) {
+		let oldest = null;
+		let oldest_at = 0;
+
+		for (let i = 0; i < length(names); i++) {
+			let entry = table[names[i]];
+			let at = entry.ts ?? entry.updated ?? 0;
+
+			if (oldest == null || at < oldest_at) {
+				oldest = names[i];
+				oldest_at = at;
+			}
+		}
+
+		if (oldest == null)
+			break;
+
+		delete table[oldest];
+		names = keys(table);
+	}
+}
+
+function record_dhcp4(mac, ip) {
+	/* The newest assignment wins: a host that moved subnets keeps one row. */
+	data.dhcp4[mac] = { ip: ip, ts: time() };
+	trim_hosts(data.dhcp4);
+	dirty = true;
+}
+
+function record_host6(mac, ip) {
+	let host = data.hosts6[mac] ?? {};
+
+	host[ip] = time();
+	host.updated = time();
+
+	/* Privacy extensions give one host a new address every few hours; keep
+	 * the newest ones so the file (and the row) stays readable. */
+	let addrs = [];
+
+	for (let addr in host)
+		if (addr != 'updated')
+			push(addrs, [ addr, host[addr] ]);
+
+	while (length(addrs) > MAX_V6) {
+		let oldest = 0;
+
+		for (let i = 0; i < length(addrs); i++)
+			if (addrs[i][1] < addrs[oldest][1])
+				oldest = i;
+
+		delete host[addrs[oldest][0]];
+		splice(addrs, oldest, 1);
+	}
+
+	data.hosts6[mac] = host;
+	trim_hosts(data.hosts6);
+	dirty = true;
+}
+
+/* ---------------- parsing ---------------- */
+
+let block = null;
+
+/* Pull the identifying fields out of one line of a DHCP packet. tcpdump
+ * spreads them across the header line and the indented option lines, and
+ * moved "yiaddr" to "Your-IP" between releases, so every line of the block
+ * goes through the same three probes. */
+function scan_dhcp(line, blk) {
+	let mac = match(line, /Client-Ethernet-Address ([0-9a-fA-F:]{17})/);
+
+	if (mac != null)
+		blk.mac = valid_mac(mac[1]) ?? blk.mac;
+
+	if (!blk.ack && (match(line, /type 5\b/) || match(line, /DHCP-Message[^:\n]*:\s*ACK/)))
+		blk.ack = true;
+
+	let yiaddr = match(line, /(yiaddr|Your-IP) ([0-9.]+)/);
+
+	if (yiaddr != null)
+		blk.ip4 = valid_ip4(yiaddr[2]) ?? blk.ip4;
+}
+
+function flush_block() {
+	if (block == null)
+		return;
+
+	if (block.ack && block.mac != null && block.ip4 != null)
+		record_dhcp4(block.mac, block.ip4);
+
+	block = null;
+}
+
+function open_block(line) {
+	block = {
+		ack: match(line, /type 5\b/) != null,
+		mac: null,
+		ip4: null
+	};
+
+	scan_dhcp(line, block);
+}
+
+function parse_v6(line) {
+	/* The source MAC is the first colon-pair sequence before " > ". */
+	let src = match(line, /([0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2})\s+>\s/);
+
+	if (src == null)
+		return;
+
+	let mac = valid_mac(src[1]);
+
+	/* A multicast source is never a host: the group bit is the low bit of
+	 * the first octet. */
+	if (mac == null || match(substr(mac, 1, 1), /[13579BDF]/))
+		return;
+
+	/* An advertisement always speaks for its sender. */
+	let adv = match(line, /neighbor advertisement,[^\n]*?tgt is ([0-9a-fA-F:]+)/);
+
+	if (adv != null) {
+		let ip = valid_ip6(adv[1]);
+
+		if (ip != null)
+			record_host6(mac, ip);
+
+		return;
+	}
+
+	/* A solicitation names its target only in the duplicate-address case,
+	 * where the source address is unspecified. Any other "who has" belongs
+	 * to the asker's neighbour, not to the asker. */
+	let sol = match(line, /\s::\s>\s[^\n]*?who has ([0-9a-fA-F:]+)/);
+
+	if (sol != null) {
+		let ip = valid_ip6(sol[1]);
+
+		if (ip != null)
+			record_host6(mac, ip);
+	}
+}
+
+function parse(line) {
+	/* Indented lines belong to the packet started above. The BOOTP header
+	 * itself can be one of them: with -v, tcpdump prints the ethernet and IP
+	 * line first and opens the BOOTP block on the next line. */
+	if (match(line, /^\s/)) {
+		if (block != null)
+			scan_dhcp(line, block);
+		else if (match(line, /BOOTP\/DHCP/))
+			open_block(line);
+
+		return;
+	}
+
+	flush_block();
+
+	if (match(line, /BOOTP\/DHCP/)) {
+		open_block(line);
+		return;
+	}
+
+	block = null;
+	parse_v6(line);
+}
+
+/* ---------------- capture ---------------- */
+
+function bridges() {
+	let found = [];
+	let lines = split(trim(run(
+		'for d in /sys/class/net/*; do [ -d "$d/brif" ] && basename "$d"; done 2>/dev/null'
+	)), '\n');
+
+	for (let line in lines) {
+		let name = trim(line);
+
+		if (match(name, /^[A-Za-z0-9._-]+$/))
+			push(found, name);
+	}
+
+	return found;
+}
+
+/* tcpdump dies with the interface (a wireless reload tears the bridge down),
+ * so the outer loop reopens it; procd's respawn covers the daemon itself. */
+function capture(ifs) {
+	let cmd = TCPDUMP + ' -l -n -e -v';
+
+	for (let dev in ifs)
+		cmd += ' -i ' + dev;
+
+	cmd += " '" + CAPTURE + "' 2>/dev/null";
+
+	let handle = fs.popen(cmd, 'r');
+
+	if (handle == null)
+		return false;
+
+	let line;
+
+	while ((line = handle.read('line')) != null) {
+		parse(line);
+		flush();
+	}
+
+	handle.close();
+
+	/* The stream ending means tcpdump died (interface gone, bad filter):
+	 * flush what was seen so nothing is lost to the restart. */
+	flush(true);
+
+	return true;
+}
+
+/* Feed saved tcpdump output through the same parser; used to check new
+ * packet shapes without waiting for one to happen on the wire. */
+function check(path) {
+	let lines = split(read_text(path), '\n');
+
+	for (let line in lines)
+		parse(line);
+
+	print(sprintf('%J\n', data));
+}
+
+/* ---------------- entry ---------------- */
+
+let argv = filter(ARGV, (a) => a != '--');
+
+if (length(argv) >= 2 && argv[0] == '--check') {
+	check(argv[1]);
+	exit(0);
+}
+
+if (run('[ -x ' + TCPDUMP + ' ] && echo y') == '')
+	exit(0);
+
+let ifs = filter(ARGV, (a) => a != '--');
+
+if (!length(ifs))
+	ifs = bridges();
+
+if (!length(ifs))
+	exit(0);
+
+load();
+
+while (true) {
+	/* capture() returns when tcpdump died; pausing here keeps a broken
+	 * filter from spinning the CPU while procd counts restarts. */
+	capture(ifs);
+	run('sleep 5');
+}
