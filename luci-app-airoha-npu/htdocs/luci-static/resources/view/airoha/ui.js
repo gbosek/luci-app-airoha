@@ -38,15 +38,24 @@ var COMPONENT_CSS = [
 	'.airoha-page{color:var(--ds-text);line-height:1.5}',
 	'.airoha-page :focus-visible{outline:2px solid var(--ds-primary);outline-offset:1px}',
 
-	'.ai-pagehead h2{margin:0;font-size:var(--ds-fs-2xl);line-height:1.3;font-weight:650;color:var(--ds-text)}',
 	'.ai-lede{margin:var(--ds-sp-1) 0 0;color:var(--ds-text-muted);font-size:var(--ds-fs-sm)}',
 	'.ai-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:var(--ds-sp-2);margin:var(--ds-sp-3) 0}',
 	'.ai-toolbar .ai-spacer{flex:1}',
 	'.ai-updated{color:var(--ds-text-muted);font-size:var(--ds-fs-sm)}',
 
-	'.ai-section{margin:0 0 var(--ds-sp-5);padding:var(--ds-sp-4) var(--ds-sp-4) var(--ds-sp-3);border:1px solid var(--ds-border);border-radius:var(--ds-r-lg);background:var(--ds-surface);box-shadow:var(--ds-shadow-1)}',
-	'.ai-section-head{display:flex;flex-wrap:wrap;align-items:center;gap:var(--ds-sp-2);margin:0 0 var(--ds-sp-3);padding:0 0 var(--ds-sp-2);border-bottom:1px solid var(--ds-border)}',
-	'.ai-section-head h3{margin:0;font-size:var(--ds-fs-lg);font-weight:650;color:var(--ds-text)}',
+	/* Section titles are kept as tight as the in-body .ai-subhead labels
+	 * ("Frame Engine" / "EIP93") so the five section headings (Ethernet Ports
+	 * / CPU Frequency / NPU & Offload Engine / WiFi Band Details / PPE
+	 * Entries) stop eating vertical space above their content. Argon ships a
+	 * base `h3 { padding: 1rem 1.25rem }` for its own .cbi-section headings
+	 * that also hit this title and kept it tall; override its padding here.
+	 * The top gap and the divider-to-content gap use --ds-sp-3, the same
+	 * distance the last content row keeps from the card border, the divider
+	 * hugs the text, and the horizontal padding is 0 so the title lines up
+	 * with the content instead of being inset by Argon's 1.25rem. */
+	'.ai-section{margin:0 0 var(--ds-sp-5);padding:0 var(--ds-sp-4) var(--ds-sp-3);border:1px solid var(--ds-border);border-radius:var(--ds-r-lg);background:var(--ds-surface);box-shadow:var(--ds-shadow-1)}',
+	'.ai-section-head{display:flex;flex-wrap:wrap;align-items:center;gap:var(--ds-sp-2);margin:0 0 var(--ds-sp-3);padding:0;border-bottom:1px solid var(--ds-border)}',
+	'.ai-section-head h3{margin:0;padding:var(--ds-sp-3) 0 .15em;font-size:var(--ds-fs-base);line-height:1.2;font-weight:650;color:var(--ds-text)}',
 	'.ai-section-head .ai-spacer{flex:1}',
 	'.ai-subhead{margin:var(--ds-sp-4) 0 var(--ds-sp-2);font-size:var(--ds-fs-base);font-weight:650}',
 	'.ai-subhead:first-of-type{margin-top:0}',
@@ -205,12 +214,15 @@ var COMPONENT_CSS = [
 
 	'@media (prefers-reduced-motion:reduce){.ai-skeleton,.ai-dot--live,.ai-bar-fill{animation:none;transition:none}}',
 
-	/* Theme interference guards: some themes decorate bare header/h2/h3
-	 * elements with primary-coloured bars/borders. Ours own their background
-	 * explicitly so no stray blue strip can appear above the sections. */
-	'.airoha-page header,.airoha-page header.ai-pagehead{background:transparent;border:0;box-shadow:none;padding:0;margin:0 0 var(--ds-sp-3)}',
-	'.airoha-page header::before,.airoha-page header::after{display:none}',
-	'.airoha-page h2,.airoha-page h3,.airoha-page .ai-lede{background:transparent;border:0;box-shadow:none;text-shadow:none}',
+	/* The page title is a bare <h2> direct child of .cbi-map (the same
+	 * convention the clients view and the other Airoha pages use), so the
+	 * theme's map-title treatment - the tinted bar above the page - applies to
+	 * it. It was previously wrapped in a header that forced background:
+	 * transparent and lost that bar. Section (h3) titles still own their own
+	 * look, so they stay transparent and the only tinted element is the page
+	 * heading. */
+	'.airoha-page > h2{margin:0 0 var(--ds-sp-4)}',
+	'.airoha-page h3,.airoha-page .ai-lede{background:transparent;border:0;box-shadow:none;text-shadow:none}',
 	'.airoha-page .ai-section-head h3{background:transparent}',
 
 	'@media (max-width:720px){.ai-table--stack thead{display:none}.ai-table--stack,.ai-table--stack tbody,.ai-table--stack tr,.ai-table--stack td{display:block;width:100%}.ai-table--stack tr{padding:var(--ds-sp-2) 0;border-bottom:1px solid var(--ds-border)}.ai-table--stack td{border:0;padding:0}.ai-table--stack td:before{display:block;content:attr(data-label);color:var(--ds-text-muted);font-size:var(--ds-fs-xs);font-weight:650}.ai-kv,.ai-switch-row{grid-template-columns:1fr}}'

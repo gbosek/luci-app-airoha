@@ -1854,9 +1854,7 @@ return view.extend({
 		// style) — the layout inherits the theme's content width, so the
 		// late-injected stylesheet never changes geometry (no width flash).
 		var view = E('div', { 'class': 'cbi-map airoha-page' }, [
-			E('header', { 'class': 'ai-pagehead' }, [
-				E('h2', {}, _('Airoha SoC Status')),
-		]),
+			E('h2', {}, _('Airoha SoC Status')),
 
 			aui.section({
 				title: _('Ethernet Ports'),
