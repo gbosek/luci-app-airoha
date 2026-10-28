@@ -1163,6 +1163,16 @@ function createStore() {
 			return L.resolveDefault(fs.read(SAMPLES_PATH), '').then(function(text) {
 				var data = null;
 
+				/* A ring that is present but unreadable looks exactly like a
+				 * ring that was never written, and the page would quietly go
+				 * back to the ten second clock. One line in the console, once,
+				 * is what tells an ACL mistake apart from a disabled sampler. */
+				if (!text && self.samplesWarned !== true) {
+					self.samplesWarned = true;
+					console.warn('clients: cannot read ' + SAMPLES_PATH +
+						' - the tiles fall back to the snapshot clock');
+				}
+
 				try {
 					data = text ? JSON.parse(text) : null;
 				}

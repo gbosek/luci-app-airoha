@@ -17,6 +17,7 @@
 				"/usr/libexec/clients-dns status": [ "exec" ],
 				"/tmp/clients-history.json": [ "read" ],
 				"/tmp/clients-snapshot.json": [ "read" ],
+				"/tmp/clients-samples.json": [ "read" ],
 				"/tmp/clients-dns.json": [ "read" ]
 			}
 		},

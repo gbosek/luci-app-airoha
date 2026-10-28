@@ -641,6 +641,18 @@ return L.Class.extend({
 		var current = select.value;
 		var options = this.deviceOptions();
 
+		/* Rebuilding identical options is a visible event: an open dropdown
+		 * closes, and the element the user was about to click is gone. The
+		 * roster is read every few seconds while the segment is open, so it is
+		 * compared before it is replaced. */
+		var signature = options.map(function(option) {
+			return option.getAttribute('value') + '|' + option.textContent;
+		}).join('\n');
+
+		if (signature === this.selectSignature)
+			return;
+
+		this.selectSignature = signature;
 		dom.content(select, options);
 
 		/* Keep the selection across a refresh, and drop it if the device left the
@@ -653,14 +665,17 @@ return L.Class.extend({
 
 	/* ---------------- view ---------------- */
 
-	update: function() {
+	update: function(roster) {
 		var clients = this.store.clients();
 
 		this.clients = clients;
 		this.store.pushTrend(clients);
 
 		this.renderSummary(this.summarise(clients));
-		this.refreshDeviceSelect();
+
+		if (roster)
+			this.refreshDeviceSelect();
+
 		this.renderChart();
 	},
 
@@ -700,7 +715,7 @@ return L.Class.extend({
 			self.renderChart();
 		});
 
-		this.update();
+		this.update(true);
 
 		poll.add(L.bind(function() {
 			var jobs;
@@ -718,8 +733,15 @@ return L.Class.extend({
 			 * worth. */
 			jobs = [ this.store.fetchSamples() ];
 
-			if ((Date.now() - this.store.lastSnapshotLoad) >= common.SAMPLE_INTERVAL * 1000)
+			/* The roster only changes when the snapshot does, and rebuilding
+			 * the selector is not free: at one tick a second it would also
+			 * close the list under someone who has it open. */
+			var roster = false;
+
+			if ((Date.now() - this.store.lastSnapshotLoad) >= common.SAMPLE_INTERVAL * 1000) {
 				jobs.push(this.store.fetchSnapshot());
+				roster = true;
+			}
 
 			if ((Date.now() - this.store.lastLeaseLoad) >= common.LEASE_INTERVAL * 1000)
 				jobs.push(this.store.fetchLeases());
@@ -728,7 +750,7 @@ return L.Class.extend({
 				jobs.push(this.store.loadHistory());
 
 			return Promise.all(jobs).then(function() {
-				self.update();
+				self.update(roster);
 			}).catch(function(error) {
 				L.error(error);
 			});
