@@ -139,21 +139,27 @@ _cpu_ticks_json() {
 # minutes later now all show the same curve, and the per-core utilisation is
 # differentiated once here instead of once per tab.
 #
-# Cost per 5 s poll: one `date`, one awk for the sample, one awk for the JSON.
-# The sampler counts the lines it has to read anyway (to place the gate), so no
-# `wc` is spawned; the trim runs once every ~40 s and rewrites ~2 KB on tmpfs.
+# Cost per poll: one `date`, one awk for the sample, one awk for the JSON. The
+# sampler counts the lines it has to read anyway (to place the gate), so no
+# `wc` is spawned; the trim runs once every ~80 s and rewrites ~2 KB on tmpfs.
 # Nothing here reads a file it did not just write, and every parse tolerates a
 # torn or hand-edited line instead of failing the whole reply.
 #
-# Sampling is gated to one point per HIST_GATE seconds. The page polls every
-# 5 s, but a page load fires two dashboards back to back and a second tab keeps
-# its own phase. Because the newest timestamp is shared, a tab that always
-# polls a little behind another reads the curve instead of doubling its rate.
-# That is also why the gate is below the poll interval: two tabs two seconds
-# apart would otherwise block each other at every single round, forever.
-HIST_MAX=120            # samples kept: 120 x 5 s = 10 minutes
+# Sampling is gated to one point per HIST_GATE seconds, which with the page's
+# 5 s poll means one point every second round (10 s). The gate has to sit
+# strictly between one and two poll intervals, with room for jitter:
+#   * above 5 s, so the first paint's two back-to-back dashboards (0.05-2 s
+#     apart) and a single poll round cannot both write a sample;
+#   * at or below 10 s, so two consecutive polls always pass. A gate of 10 s
+#     would sit exactly on that boundary and any jitter would stretch the
+#     cadence to 15 s, hence 8 s (that is also why the gate must never exceed
+#     twice the poll interval: two tabs two seconds apart would then block each
+#     other at every round, forever).
+# Because the newest timestamp is shared, a tab that always polls a little
+# behind another reads the curve instead of doubling its rate.
+HIST_MAX=120            # samples kept: 120 x 10 s = 20 minutes
 HIST_TRIM_AT=128        # append up to this many, then trim back to HIST_MAX
-HIST_GATE=4             # minimum seconds between two accepted samples
+HIST_GATE=8             # minimum seconds between two accepted samples (~10 s)
 HIST_TTL=1800           # samples older than this are not published (30 min)
 HIST_DIR=/tmp
 HIST_FREQ=$HIST_DIR/luci-airoha-npu.cpu.freq.hist
@@ -188,7 +194,7 @@ _cpu_hist_sample() {
 	out=$(awk -v now="$now" -v freq="$freq" -v gate="$HIST_GATE" \
 		-v freqf="$HIST_FREQ" -v loadf="$HIST_LOAD" -v basef="$HIST_BASE" '
 		BEGIN {
-			nf = 0; nl = 0; lf = 0; bts = 0; nbc = 0
+			nf = 0; nl = 0; lf = 0; ll = 0; bts = 0; nbc = 0
 			# Both files are read here anyway to place the gate, so counting
 			# their lines costs no extra pass and saves a `wc` fork.
 			while ((getline l < freqf) > 0) {
@@ -198,7 +204,7 @@ _cpu_hist_sample() {
 			close(freqf)
 			while ((getline l < loadf) > 0) {
 				split(l, a, " ")
-				if (a[1] ~ /^[0-9]+$/) nl++
+				if (a[1] ~ /^[0-9]+$/) { nl++; ll = a[1] + 0 }
 			}
 			close(loadf)
 			# Previous reference, "<ts> <total> <idle> <total> <idle> ...".
@@ -237,10 +243,19 @@ _cpu_hist_sample() {
 			print line > basef
 			close(basef)
 
-			if (freq > 0 && (lf == 0 || now - lf >= gate || now < lf))
-				printf "F %d %d\n", now, freq
+			# One tick publishes BOTH curves: they share an x window, so a
+			# point that only one of them had would put the two charts half a
+			# poll out of phase (visible as the head dots drifting apart).
+			# The gate therefore looks at the newest of the two published
+			# timestamps, never at `bts` - the reference is rewritten every
+			# round, so `now - bts` is always one poll interval and would block
+			# every sample the moment the gate exceeds the poll.
+			last = (lf > ll ? lf : ll)
+			if (last > 0 && now - last < gate && now >= last) exit
 
-			if (bts > 0 && nbc == nc && (now - bts >= gate || now < bts)) {
+			if (freq > 0) printf "F %d %d\n", now, freq
+
+			if (bts > 0 && nbc == nc) {
 				out = ""
 				measured = 0
 				for (i = 1; i <= nc; i++) {

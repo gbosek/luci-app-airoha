@@ -302,16 +302,17 @@ function renderFreqCard(st) {
 }
 
 /* ── History data (backend ring buffers) ──
- * Both curves are sampled once per poll by the RPC backend into bounded files
- * under /tmp (see `_cpu_hist` in luci.airoha_npu) and arrive with every status
- * reply. That is why there is no storage bookkeeping here at all: a reload, a
- * second tab, or a tab reopened ten minutes later all read the same window,
- * and the /proc/stat subtraction that produces a utilisation percentage is
- * done by the sampler instead of once per tab.
+ * Both curves are sampled by the RPC backend into bounded files under /tmp
+ * (see `_cpu_hist` in luci.airoha_npu) and arrive with every status reply.
+ * That is why there is no storage bookkeeping here at all: a reload, a second
+ * tab, or a tab reopened later all read the same window, and the /proc/stat
+ * subtraction that produces a utilisation percentage is done by the sampler
+ * instead of once per tab.
  *
- * HIST_WINDOW mirrors HIST_MAX in the backend. The charts use it as the fixed
- * x window, so a buffer that is only partly filled grows in from the right
- * edge and the newest sample always lands on the right border.
+ * HIST_WINDOW mirrors HIST_MAX in the backend, including its cadence: one
+ * point per two poll rounds, i.e. 120 x 10 s = 20 minutes. The charts use it
+ * as the fixed x window, so a buffer that is only partly filled grows in from
+ * the right edge and the newest sample always lands on the right border.
  *
  * A backend that predates `cpu_history` publishes nothing, and the charts stay
  * empty instead of showing a curve measured on a different clock than the
@@ -319,8 +320,12 @@ function renderFreqCard(st) {
 var HIST_WINDOW = 120;
 /* A gap this long means nobody was sampling in between: no page was open, the
  * browser throttled the poll, or the board rebooted. The plot is broken there
- * rather than bridging time that was never measured. */
-var HIST_GAP_MS = 20000;
+ * rather than bridging time that was never measured.
+ *
+ * Four samples, not two: the backend writes one point per two 5 s polls (10 s),
+ * so a single missed round produces a 20 s spacing and must still be joined -
+ * only a real absence (>= 40 s) is worth a break. */
+var HIST_GAP_MS = 40000;
 
 var freqHistory = [];   /* [ { t: ms, v: kHz } ], oldest first */
 var loadHistory = [];   /* [ { t: ms, u: [pct|null, ...] } ], oldest first */
@@ -577,9 +582,9 @@ function renderFreqChart(min, max, containerW) {
 		for (var k = 0; k < idx.length; k++)
 			pts.push(xs[idx[k]].toFixed(1) + ',' + ys[idx[k]].toFixed(1));
 		/* A lone sample has no span to stroke: draw the dot only. The old
-		 * chart stretched it into a full-width line, which read as ten minutes
-		 * of steady history on the very first poll. The newest sample already
-		 * gets the head dot below, so it is not drawn twice. */
+		 * chart stretched it into a full-width line, which read as the whole
+		 * window of steady history on the very first poll. The newest sample
+		 * already gets the head dot below, so it is not drawn twice. */
 		if (idx.length === 1) {
 			if (idx[0] !== n - 1)
 				body.push(svgEl('circle', {
@@ -636,9 +641,10 @@ function renderFreqChart(min, max, containerW) {
  *
  * A utilisation percentage needs two /proc/stat snapshots, and the backend
  * owns both: it keeps the previous reference in /tmp, differentiates it on the
- * 5 s poll and publishes the finished percentages here. The view therefore
- * holds no baseline and no clock - which is what makes a reload, a second tab
- * and a reopened tab agree instead of each measuring its own interval.
+ * poll (once every 10 s) and publishes the finished percentages here. The view
+ * therefore holds no baseline and no clock - which is what makes a reload, a
+ * second tab and a reopened tab agree instead of each measuring its own
+ * interval.
  *
  * A sample is one array entry per core (index = core number, so the chart can
  * draw one coloured line per thread). A null entry marks a core that was not
@@ -1770,7 +1776,7 @@ return view.extend({
 							}),
 							// The usage curve is what makes the frequency steps above
 							// readable, so the two charts share a row and the same
-							// sample spacing (one point per 5 s poll).
+							// sample spacing (one point per 10 s).
 							aui.card({
 								name: _('CPU Usage History'), accent: 'var(--ai-cpu)',
 								body: E('div', { 'id': 'cpu-load-history-content' }, [ renderLoadCard() ])
