@@ -40,6 +40,11 @@ var TYPES = [
 	{ value: 'wan', label: _('WAN') }
 ];
 
+/* Unique id counter for the chart's <linearGradient> defs: ids live in the
+ * document, so two renders alive at once (a re-render racing a poll) must not
+ * reuse the same id or one chart would borrow the other's gradient. */
+var chartSeq = 0;
+
 /* Nice round numbers for the Y axis: a chart whose top reads "3.47 MiB/s" is
  * harder to read than one whose top reads "4 MiB/s". */
 function niceCeiling(value) {
@@ -309,6 +314,23 @@ return L.Class.extend({
 			}).join(' ');
 		}
 
+		/* Close a series down to the plot floor so it can be filled as an area,
+		 * not just stroked. Both series are filled, each in its own colour, so
+		 * the chart reads as two bands rather than two hairlines; the stroke
+		 * paths below are drawn on top to keep the boundary crisp. */
+		function area(key) {
+			var base = (padTop + plotH).toFixed(1);
+			var d = line(key);
+
+			if (!d)
+				return '';
+
+			return d
+				+ ' L' + x(t1).toFixed(1) + ' ' + base
+				+ ' L' + x(t0).toFixed(1) + ' ' + base
+				+ ' Z';
+		}
+
 		/* Three anchor labels only - top, middle, floor - the way the SoC
 		 * page's usage history does it; one per gridline crowds the card. */
 		var grid = '';
@@ -344,13 +366,26 @@ return L.Class.extend({
 		 * is a number, a formatted rate or a clock time; only the two
 		 * translatable strings need escaping. */
 		var host = E('div');
+		var gid = 'clim' + (++chartSeq);
 
 		host.innerHTML =
 			'<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" class="clients-chart__svg"'
 			+ ' style="display:block;cursor:crosshair" role="img">'
 			+ '<title>' + esc(_('Traffic trend')) + '</title>'
 			+ '<desc>' + esc(_('Upload and download rates over the selected window.')) + '</desc>'
+			+ '<defs>'
+			+ '<linearGradient id="' + gid + '-up" x1="0" y1="0" x2="0" y2="1">'
+			+ '<stop offset="0" style="stop-color:var(--cl-up);stop-opacity:.40"/>'
+			+ '<stop offset="1" style="stop-color:var(--cl-up);stop-opacity:0"/>'
+			+ '</linearGradient>'
+			+ '<linearGradient id="' + gid + '-down" x1="0" y1="0" x2="0" y2="1">'
+			+ '<stop offset="0" style="stop-color:var(--cl-down);stop-opacity:.40"/>'
+			+ '<stop offset="1" style="stop-color:var(--cl-down);stop-opacity:0"/>'
+			+ '</linearGradient>'
+			+ '</defs>'
 			+ '<g>' + grid + '</g>'
+			+ '<path d="' + area('up') + '" fill="url(#' + gid + '-up)" stroke="none"/>'
+			+ '<path d="' + area('down') + '" fill="url(#' + gid + '-down)" stroke="none"/>'
 			+ '<path d="' + line('up') + '" fill="none" stroke="var(--cl-up)" stroke-width="2"'
 			+ ' stroke-linejoin="round" stroke-linecap="round"/>'
 			+ '<path d="' + line('down') + '" fill="none" stroke="var(--cl-down)" stroke-width="2"'
