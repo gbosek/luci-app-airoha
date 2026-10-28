@@ -176,12 +176,6 @@ msgstr "本设备可见的全部客户端流量汇总，按局域网与互联网
 msgid "Realtime traffic trends"
 msgstr "实时流量趋势"
 
-msgid "Select device"
-msgstr "选择设备"
-
-msgid "All devices"
-msgstr "所有设备"
-
 msgid "Type"
 msgstr "类型"
 

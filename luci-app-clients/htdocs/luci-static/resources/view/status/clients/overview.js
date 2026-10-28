@@ -116,7 +116,6 @@ function fmtSampleClock(ms) {
 return L.Class.extend({
 	store: null,
 	clients: null,
-	selectedMac: '',
 	selectedType: 'total',
 	windowMinutes: 10,
 
@@ -317,22 +316,17 @@ return L.Class.extend({
 
 	/*
 	 * `pick(point)` returns { up, down } in bytes/second for a point, which
-	 * lets the same drawing code serve the totals, one scope and a single
-	 * device without a second implementation.
+	 * lets the same drawing code serve every scope without a second
+	 * implementation. There is no per-device mode: the tiles and this chart
+	 * answer the same question - how busy is the network - and a chart of one
+	 * station belongs on the devices tab, where the numbers are per station
+	 * anyway.
 	 */
 	seriesFor: function() {
 		var type = this.selectedType;
-		var mac = this.selectedMac;
 
 		return function(point) {
 			var source = point;
-
-			if (mac) {
-				source = point.byMac ? point.byMac[mac] : null;
-
-				if (!source)
-					return { up: 0, down: 0 };
-			}
 
 			if (type == 'wan')
 				return { up: source.wanUp || 0, down: source.wanDown || 0 };
@@ -623,59 +617,15 @@ return L.Class.extend({
 		dom.content(this.chart, [ wrap ]);
 	},
 
-	deviceOptions: function() {
-		var clients = this.clients || [];
-		var options = [ E('option', { 'value': '' }, _('All devices')) ];
-
-		clients.filter(function(entry) { return entry.mac; }).forEach(function(entry) {
-			options.push(E('option', { 'value': entry.mac }, [
-				entry.hostname || entry.ipv4[0] || entry.mac
-			]));
-		});
-
-		return options;
-	},
-
-	refreshDeviceSelect: function() {
-		var select = this.deviceSelect;
-		var current = select.value;
-		var options = this.deviceOptions();
-
-		/* Rebuilding identical options is a visible event: an open dropdown
-		 * closes, and the element the user was about to click is gone. The
-		 * roster is read every few seconds while the segment is open, so it is
-		 * compared before it is replaced. */
-		var signature = options.map(function(option) {
-			return option.getAttribute('value') + '|' + option.textContent;
-		}).join('\n');
-
-		if (signature === this.selectSignature)
-			return;
-
-		this.selectSignature = signature;
-		dom.content(select, options);
-
-		/* Keep the selection across a refresh, and drop it if the device left the
-		 * table - otherwise the chart would silently go flat. */
-		var still = options.some(function(option) { return option.getAttribute('value') == current; });
-
-		select.value = still ? current : '';
-		this.selectedMac = select.value;
-	},
-
 	/* ---------------- view ---------------- */
 
-	update: function(roster) {
+	update: function() {
 		var clients = this.store.clients();
 
 		this.clients = clients;
 		this.store.pushTrend(clients);
 
 		this.renderSummary(this.summarise(clients));
-
-		if (roster)
-			this.refreshDeviceSelect();
-
 		this.renderChart();
 	},
 
@@ -690,12 +640,6 @@ return L.Class.extend({
 		 * chart before the tree exists, and the first paint must already name
 		 * the series it drew. */
 		this.legend = E('div', { 'class': 'clients-chart__legend' });
-		this.deviceSelect = E('select', { 'id': 'clients-ov-device', 'name': 'clients-ov-device', 'class': 'cbi-input-select' }, this.deviceOptions());
-
-		this.deviceSelect.addEventListener('change', function() {
-			self.selectedMac = self.deviceSelect.value;
-			self.renderChart();
-		});
 
 		var typeSelect = E('select', { 'id': 'clients-ov-type', 'name': 'clients-ov-type', 'class': 'cbi-input-select' }, TYPES.map(function(type) {
 			return E('option', { 'value': type.value, 'selected': (type.value == self.selectedType) }, type.label);
@@ -715,7 +659,7 @@ return L.Class.extend({
 			self.renderChart();
 		});
 
-		this.update(true);
+		this.update();
 
 		poll.add(L.bind(function() {
 			var jobs;
@@ -733,15 +677,8 @@ return L.Class.extend({
 			 * worth. */
 			jobs = [ this.store.fetchSamples() ];
 
-			/* The roster only changes when the snapshot does, and rebuilding
-			 * the selector is not free: at one tick a second it would also
-			 * close the list under someone who has it open. */
-			var roster = false;
-
-			if ((Date.now() - this.store.lastSnapshotLoad) >= common.SAMPLE_INTERVAL * 1000) {
+			if ((Date.now() - this.store.lastSnapshotLoad) >= common.SAMPLE_INTERVAL * 1000)
 				jobs.push(this.store.fetchSnapshot());
-				roster = true;
-			}
 
 			if ((Date.now() - this.store.lastLeaseLoad) >= common.LEASE_INTERVAL * 1000)
 				jobs.push(this.store.fetchLeases());
@@ -750,7 +687,7 @@ return L.Class.extend({
 				jobs.push(this.store.loadHistory());
 
 			return Promise.all(jobs).then(function() {
-				self.update(roster);
+				self.update();
 			}).catch(function(error) {
 				L.error(error);
 			});
@@ -765,10 +702,6 @@ return L.Class.extend({
 			this.summary,
 			E('h3', {}, _('Realtime traffic trends')),
 			E('div', { 'class': 'clients-chart__controls' }, [
-				E('label', { 'class': 'clients-control' }, [
-					E('span', {}, _('Select device')),
-					this.deviceSelect
-				]),
 				E('label', { 'class': 'clients-control' }, [
 					E('span', {}, _('Type')),
 					typeSelect

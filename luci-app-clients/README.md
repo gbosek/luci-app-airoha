@@ -48,10 +48,10 @@ nothing here starts a measurement, and nothing polls a daemon over a socket.
 
 The sampling clock belongs to the collector, not to the browser: every pass
 walks conntrack once and writes `/tmp/clients-snapshot.json`, with `rates`,
-`totals` and the `rate_window` they were divided by, plus one `trend` point
-(the summed LAN/WAN rates, the inner-LAN figure, and on a routed box the busiest
-eight devices). The chart's *Type* selector picks one of three - total, WAN, LAN -
-and the LAN series already has the inner-LAN traffic folded into it. The
+`totals` and the `rate_window` they were divided by, plus one aggregate `trend`
+point (the summed LAN/WAN rates and the inner-LAN figure). The chart's *Type*
+selector picks one of three - total, WAN, LAN - and the LAN series already has
+the inner-LAN traffic folded into it. The
 series holds 180 points - 30 minutes at the default cadence, enough for the
 widest window the page offers - so the chart is already drawn from history when
 the page opens instead of filling in from the moment someone looks. Opening the
@@ -113,9 +113,19 @@ Two details worth knowing before reading the numbers:
   (3) seconds of deltas and divides once, which hides the batch boundaries
   without inventing traffic - every byte in the sum came out of a counter. Three
   seconds is short on purpose: the window is also the lag the tile shows.
-- **The ring carries no per-device split.** It is four figures and nothing
-  else, so the device selector keeps reading the snapshot's series; only the
-  tile and the coarse shape of the chart move at the faster cadence.
+- **The ring carries no per-device series.** It is four aggregate figures and
+  the chart draws exactly those: there is no device selector, because a chart
+  of one station is what the devices tab is for and the two would answer the
+  same question at two different clocks.
+- **Per-station speeds ride the same file.** The ring also carries a
+  `macrates` table - MAC to `[up, down]` - refreshed every `MAC_RATE_EVERY` (5)
+  seconds, which is as often as its source changes. It comes from `nlbwmon`:
+  the hardware offload freezes conntrack's counters per flow, and nlbwmon reads
+  the accounting the driver writes back. Measured over a minute, nlbwmon
+  reconciles in batches every four to five seconds, so sampling it at 1 Hz
+  would report four zeros and a spike. The devices tab takes the larger of
+  that figure and the collector's, so a half-elapsed batch cannot dip a busy
+  station to zero.
 
 ### What the LAN figure counts
 

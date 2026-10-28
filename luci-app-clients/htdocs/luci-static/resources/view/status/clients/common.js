@@ -1086,6 +1086,10 @@ function createStore() {
 		 * sample from being applied twice. */
 		ring: null,
 		ringTs: 0,
+		/* Per-station WAN rates, published by the sampler every few seconds:
+		 * { ts, window, macs: { MAC: [up, down] } }. Null until the first ring
+		 * that carries them. */
+		macRates: null,
 		/* False until a snapshot carried a real measurement window. The first
 		 * rate of a session is unknown, not zero - marking the point lets the
 		 * trend chart break the line there instead of drawing the fake rise
@@ -1219,6 +1223,11 @@ function createStore() {
 
 			this.ringTs = ts;
 			this.ring = ring;
+			/* Per-station speeds, refreshed on their own five second step by
+			 * the same writer. Kept aside instead of inside the rows: the ring
+			 * carries four aggregate figures, and a table per sample would
+			 * multiply the file by the size of the roster. */
+			this.macRates = (data.macrates && data.macrates.macs) ? data.macrates : null;
 			this.rebuildTrend();
 
 			return ring[ring.length - 1];
@@ -1532,7 +1541,7 @@ function createStore() {
 
 		/* The merged rows, ready to render. */
 		clients: function() {
-			return buildClients({
+			var list = buildClients({
 				leases4: this.state.leases4,
 				leases6: this.state.leases6,
 				hints: this.state.hints,
@@ -1551,6 +1560,46 @@ function createStore() {
 				snoop6: this.state.snoop6,
 				names: this.state.names
 			});
+
+			/*
+			 * The WAN column moves on the fast ring's five second step.
+			 *
+			 * The snapshot's per-client rates are differenced by the collector,
+			 * which cannot run often enough to look live - a conntrack walk is
+			 * half a second. nlbwmon answers the same question for every
+			 * station in one 3 ms call, and it is the only source that sees
+			 * offloaded flows at all, so the sampler republishes it and the
+			 * table takes it. Only the rate: the bracketed totals stay with
+			 * the collector, which owns the accumulation.
+			 *
+			 * The larger of the two is shown, not simply the newer one. Both
+			 * are floors - nlbwmon reconciles in batches, and a sample that
+			 * lands half way through one has seen only part of the traffic -
+			 * so taking the fast figure unconditionally would dip a station to
+			 * zero every few seconds for no reason the network can explain.
+			 */
+			var macs = this.macRates;
+
+			if (macs && macs.macs && macs.window > 0) {
+				list.forEach(function(entry) {
+					var fast = entry.mac ? macs.macs[entry.mac.toUpperCase()] : null;
+
+					if (!fast)
+						return;
+
+					if (!entry.rate) {
+						entry.rate = {
+							up: 0, down: 0, lanUp: 0, lanDown: 0,
+							wanUp: 0, wanDown: 0
+						};
+					}
+
+					entry.rate.wanUp = Math.max(entry.rate.wanUp || 0, fast[0] || 0);
+					entry.rate.wanDown = Math.max(entry.rate.wanDown || 0, fast[1] || 0);
+				});
+			}
+
+			return list;
 		},
 
 		/*

@@ -559,7 +559,11 @@ return L.Class.extend({
 			if (document.hidden || this.hidden)
 				return Promise.resolve();
 
-			jobs = [ this.store.fetchSnapshot() ];
+			/* Both files, same cadence: the snapshot carries the roster and the
+			 * totals, the ring carries the per-station WAN rates that were
+			 * measured a moment ago. Reading only the snapshot left the speed
+			 * column on the collector's ten second clock. */
+			jobs = [ this.store.fetchSnapshot(), this.store.fetchSamples() ];
 
 			if ((Date.now() - this.store.lastLeaseLoad) >= common.LEASE_INTERVAL * 1000)
 				jobs.push(this.store.fetchLeases());

@@ -145,11 +145,6 @@ const MAX_TRAFFIC_ROWS = 1024;
  * minutes, so at the default 10 s cadence 180 points cover it with margin. */
 const TREND_POINTS = 180;
 
-/* Per-device series are kept for the busiest few only. A chart of one device is
- * a convenience; an unbounded MAC -> 180 samples table would dwarf the snapshot
- * it lives in. */
-const TREND_MACS = 8;
-
 /* Points kept in the fast ring. At the 1 s tick the page runs this is three
  * minutes, which covers the shortest window the chart offers (five) with room
  * for a late tick, at a granularity the 10 s trend cannot express. */
@@ -166,6 +161,12 @@ const SAMPLE_SPAN = 3;
  * uplink is routed, so it is not a brif member and has to be named; PPPoE
  * first because that is the shape on this fleet, then the plain names. */
 const WAN_CANDIDATES = [ 'pppoe-wan', 'wan', 'wwan', 'wwan0', 'usb0' ];
+
+/* Stations kept in the per-MAC rate table. A pathological neighbour table
+ * should not turn the ring into a large file; the busiest are not ranked
+ * because nlbwmon already answers for the whole box in one call and dropping
+ * the tail is cheaper than sorting every five seconds. */
+const SAMPLE_HOSTS = 256;
 
 /* A rate is only meaningful across a short window. If the collector was
  * stopped, suspended or simply ran late, the counters moved but the interval
@@ -2276,45 +2277,12 @@ function intra_derive(data, prev) {
 	};
 }
 
-/*
- * The per-device series, busiest first and as flat arrays: the MAC would
- * otherwise be repeated for every one of the 180 points it appears in, and
- * this table lives in RAM next to the rest of the snapshot. The page turns the
- * arrays back into the objects its chart already reads.
- */
-function trend_macs(per_mac) {
-	let ranked = [];
-	let out = {};
-
-	for (let mac, entry in per_mac)
-		push(ranked, [ mac, (entry.up ?? 0) + (entry.down ?? 0) ]);
-
-	sort(ranked, (a, b) => b[1] - a[1]);
-
-	for (let i = 0; i < TREND_MACS && i < length(ranked); i++) {
-		let entry = per_mac[ranked[i][0]];
-
-		out[ranked[i][0]] = [
-			entry.up, entry.down,
-			entry.lanUp, entry.lanDown,
-			entry.wanUp, entry.wanDown
-		];
-	}
-
-	return out;
-}
-
-/*
- * One point of the series the page draws, appended to the one already in the
- * file. This is the part the browser used to keep in memory: a chart that
- * starts at "whenever the page was opened" answers no question, and the
- * collector is already sampling on a clock, so the history costs one array.
- *
- * On a bridge the per-client counters are frozen by the offload, so the point
- * comes from the port counters - and there is no per-device series at L2,
- * because a port counter cannot say which client a frame belonged to.
- */
-function trend_append(data, prev, ipMac) {
+/* One aggregate point per collection pass: the four rates the chart draws,
+ * whether this pass had a baseline, and the inner-LAN rate where the box has
+ * that counter. No per-device series - the devices table is where a per-station
+ * figure belongs, and carrying eight MACs through 180 points tripled the
+ * snapshot for a chart that no longer reads them. */
+function trend_append(data, prev) {
 	let trend = (type(prev?.trend) == 'array') ? prev.trend : [];
 	let point = { t: data.ts, valid: ((data.rate_window ?? 0) > 0) };
 
@@ -2368,41 +2336,19 @@ function trend_append(data, prev, ipMac) {
 		point.wanDown = l2.wanDown;
 	}
 	else {
-		let per_mac = {};
-
+		/* No port counters to read: the aggregate still has to come from
+		 * somewhere, and the per-IP rates are what is left. */
 		point.lanUp = 0;
 		point.lanDown = 0;
 		point.wanUp = 0;
 		point.wanDown = 0;
 
 		for (let ip, rate in (data.rates ?? {})) {
-			let mac = ipMac[ip];
-			let entry = null;
-
 			point.lanUp += rate.lanUp ?? 0;
 			point.lanDown += rate.lanDown ?? 0;
 			point.wanUp += rate.wanUp ?? 0;
 			point.wanDown += rate.wanDown ?? 0;
-
-			if (mac == null)
-				continue;
-
-			entry = per_mac[mac];
-
-			if (entry == null) {
-				entry = { up: 0, down: 0, lanUp: 0, lanDown: 0, wanUp: 0, wanDown: 0 };
-				per_mac[mac] = entry;
-			}
-
-			entry.up += rate.up ?? 0;
-			entry.down += rate.down ?? 0;
-			entry.lanUp += rate.lanUp ?? 0;
-			entry.lanDown += rate.lanDown ?? 0;
-			entry.wanUp += rate.wanUp ?? 0;
-			entry.wanDown += rate.wanDown ?? 0;
 		}
-
-		point.macs = trend_macs(per_mac);
 	}
 
 	push(trend, point);
@@ -2576,18 +2522,6 @@ function trend_drop(data) {
 	if (type(trend) != 'array' || !length(trend))
 		return false;
 
-	let stripped = false;
-
-	for (let point in trend) {
-		if (point.macs != null) {
-			delete point.macs;
-			stripped = true;
-		}
-	}
-
-	if (stripped)
-		return true;
-
 	splice(trend, 0, int(length(trend) / 8) + 1);
 
 	return true;
@@ -2626,11 +2560,12 @@ function sample_load(path) {
 	let state = cache_load(path);
 
 	if (type(state?.samples) != 'array')
-		return { samples: [], prev: null };
+		return { samples: [], prev: null, macrates: null };
 
 	return {
 		samples: state.samples,
-		prev: (type(state.prev) == 'object') ? state.prev : null
+		prev: (type(state.prev) == 'object') ? state.prev : null,
+		macrates: (type(state.macrates) == 'object') ? state.macrates : null
 	};
 }
 
@@ -2686,7 +2621,71 @@ function sample_drop(data) {
 	return true;
 }
 
-function tick(path, max_bytes) {
+/* Per-station WAN rates, on nlbwmon's own clock.
+ *
+ * The devices table wants a speed per station, and there is only one source
+ * left for it here: the hardware offload freezes conntrack's byte counters
+ * (measured on this fleet - 2.82 MB across the WAN in 43 s while every
+ * conntrack counter added up to zero), and nlbwmon reads the accounting the
+ * driver writes back for those flows.
+ *
+ * nlbwmon reconciles in batches, measured at every four to five seconds. A one
+ * second pass over it would report four zeros and a spike - the same comb the
+ * tiles had before the moving window - so this runs on a five second step,
+ * which is the resolution the source actually has, and the page is told the
+ * window it was divided by.
+ *
+ * It rides the ring's writer instead of getting a file of its own: two
+ * processes renaming the same document lose each other's passes, and the page
+ * already reads this one every second.
+ */
+const MAC_RATE_EVERY = 5;
+
+function sample_macs(prev) {
+	let now = time();
+	let usage = nlbw_usage(null);
+	let macs = {};
+	let base = {};
+	let before = (type(prev?.base) == 'object') ? prev.base : null;
+	let since = int(before?.ts) ?? 0;
+	let window = now - since;
+	let valid = (window > 0 && window <= RATE_MAX_GAP);
+
+	if (usage == null) {
+		/* No nlbwmon on this box: say so with an empty table, and do not keep
+		 * a stale one - a per-station speed that stopped moving is worse than
+		 * no per-station speed. */
+		return { ts: now, window: 0, macs: macs };
+	}
+
+	let count = 0;
+
+	for (let mac, entry in usage) {
+		if (count++ >= SAMPLE_HOSTS)
+			break;
+
+		base[mac] = [ entry.up, entry.down ];
+
+		let was = (before != null && type(before.counters) == 'object') ? before.counters[mac] : null;
+
+		if (!valid || type(was) != 'array')
+			continue;
+
+		macs[mac] = [
+			int((grew(entry.up, int(was[0]) ?? 0) / window) + 0.5),
+			int((grew(entry.down, int(was[1]) ?? 0) / window) + 0.5)
+		];
+	}
+
+	return {
+		ts: now,
+		window: valid ? window : 0,
+		macs: macs,
+		base: { ts: now, counters: base }
+	};
+}
+
+function tick(path, max_bytes, with_macs) {
 	let state = sample_load(path);
 	let prev = state.prev;
 	let samples = state.samples;
@@ -2783,11 +2782,20 @@ function tick(path, max_bytes) {
 	if (length(samples) > SAMPLE_POINTS)
 		samples = slice(samples, length(samples) - SAMPLE_POINTS);
 
+	let macrates = state.macrates;
+
+	/* Per-station speeds ride this writer rather than getting a file of their
+	 * own, but only every MAC_RATE_EVERY ticks: that is as often as the source
+	 * changes. */
+	if (with_macs !== false)
+		macrates = sample_macs(macrates);
+
 	let written = write_capped(path, {
 		ts: now,
 		window: span,
 		bridge: bridge.mode,
 		samples: samples,
+		macrates: macrates,
 		/* What the next tick differences against, and the deltas not yet aged
 		 * out of the moving window. Same file because it is the same writer
 		 * and the same clock; the page ignores it. */
@@ -2837,15 +2845,23 @@ const TICK_MAX_STEP = 60000;
 
 function loop(path, max_bytes, interval) {
 	let step = (int(interval) != null && int(interval) > 0) ? int(interval) : 1000;
+	let last_macs = 0;
 
 	if (step > TICK_MAX_STEP)
 		step = TICK_MAX_STEP;
 
 	while (true) {
 		let started = mono_ms();
+		/* The per-station table is taken on the first pass - so it has a
+		 * baseline at once - and then once per MAC_RATE_EVERY seconds, which
+		 * is the rate the source itself changes at. */
+		let with_macs = ((started - last_macs) >= MAC_RATE_EVERY * 1000);
+
+		if (with_macs)
+			last_macs = started;
 
 		try {
-			tick(path, max_bytes);
+			tick(path, max_bytes, with_macs);
 		}
 		catch (e) {
 			/* One bad pass must not take the sampler down. The ring already
@@ -3122,7 +3138,7 @@ if (length(ARGV)) {
 		traffic_derive(snap, prev);
 		bridge_derive(snap, prev);
 		intra_derive(snap, prev);
-		trend_append(snap, prev, ip_mac_map(snap.arp, { snoop4: snap.snoop4, snoop6: snap.snoop6 }));
+		trend_append(snap, prev);
 
 		/* The archive is merged on its own, slower clock and rides on the
 		 * snapshot already in hand - walking conntrack is what costs, so the
