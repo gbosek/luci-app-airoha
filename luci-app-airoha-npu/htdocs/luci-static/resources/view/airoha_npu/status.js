@@ -275,14 +275,11 @@ function updateSummary(st, ti) {
 	SUMMARY_IDS.forEach(function(id) { if (tiles[id]) grid.appendChild(tiles[id]); });
 }
 
-/* ── CPU frequency ── */
-function freqState(st) {
-	st = st || {};
-	var hw = st.cpu_hw_freq || 0, min = st.cpu_min_freq || 0, max = st.cpu_max_freq || 0;
-	var freq = hw || st.cpu_cur_freq || 0;
-	return { freq: freq, min: min, max: max || freq };
-}
-
+/* ── CPU frequency ──
+ * The "which frequency is current" rule (hardware clock first, scaling target
+ * as the fallback) now lives in the backend, which uses it for the history
+ * sample as well; the view only reads cpu_min_freq / cpu_max_freq for the
+ * chart scale. */
 function renderCpuInfo(st) {
 	st = st || {};
 	return aui.card({
@@ -304,50 +301,88 @@ function renderFreqCard(st) {
 	});
 }
 
-/* ── Frequency history chart ──
- * One sample per 5 s poll, 120 samples = 10 minutes of active history. Samples
- * survive a page refresh for up to 30 minutes in this tab. A restored run and
- * a new run can have a time gap; the compact chart intentionally keeps sample
- * spacing (rather than wall-clock spacing), matching the original chart. */
-var FREQ_HISTORY_KEY = 'airoha_npu.freq_history';
-var FREQ_HISTORY_MAX_AGE_MS = 30 * 60 * 1000;
-var FREQ_HISTORY_MAX = 120;
+/* ── History data (backend ring buffers) ──
+ * Both curves are sampled once per poll by the RPC backend into bounded files
+ * under /tmp (see `_cpu_hist` in luci.airoha_npu) and arrive with every status
+ * reply. That is why there is no storage bookkeeping here at all: a reload, a
+ * second tab, or a tab reopened ten minutes later all read the same window,
+ * and the /proc/stat subtraction that produces a utilisation percentage is
+ * done by the sampler instead of once per tab.
+ *
+ * HIST_WINDOW mirrors HIST_MAX in the backend. The charts use it as the fixed
+ * x window, so a buffer that is only partly filled grows in from the right
+ * edge and the newest sample always lands on the right border.
+ *
+ * A backend that predates `cpu_history` publishes nothing, and the charts stay
+ * empty instead of showing a curve measured on a different clock than the
+ * backend's - a stale rpcd must be redeployed, not silently worked around. */
+var HIST_WINDOW = 120;
+/* A gap this long means nobody was sampling in between: no page was open, the
+ * browser throttled the poll, or the board rebooted. The plot is broken there
+ * rather than bridging time that was never measured. */
+var HIST_GAP_MS = 20000;
 
-function loadFreqHistory() {
-	var now = Date.now();
-	try {
-		var raw = sessionStorage.getItem(FREQ_HISTORY_KEY);
-		if (!raw) return [];
-		var samples = JSON.parse(raw);
-		if (!Array.isArray(samples)) return [];
-		return samples.filter(function(sample) {
-			return sample && typeof sample === 'object' &&
-				typeof sample.t === 'number' && isFinite(sample.t) && sample.t > 0 &&
-				typeof sample.v === 'number' && isFinite(sample.v) && sample.v > 0 &&
-				sample.t >= now - FREQ_HISTORY_MAX_AGE_MS;
-		}).slice(-FREQ_HISTORY_MAX);
-	} catch (err) {
-		// Storage can be disabled (including privacy modes) or contain stale data.
-		return [];
-	}
+var freqHistory = [];   /* [ { t: ms, v: kHz } ], oldest first */
+var loadHistory = [];   /* [ { t: ms, u: [pct|null, ...] } ], oldest first */
+
+function histNum(v) {
+	return (typeof v === 'number' && isFinite(v)) ? v : null;
 }
 
-function saveFreqHistory() {
-	try {
-		sessionStorage.setItem(FREQ_HISTORY_KEY, JSON.stringify(freqHistory));
-	} catch (err) {
-		// A denied or full storage area must never stop the five-second poll.
-	}
+/* Sort by time and drop the duplicate timestamps a double sample can leave
+ * behind (two tabs that poll on the same phase write the same second twice). */
+function histNormalise(samples) {
+	samples.sort(function(a, b) { return a.t - b.t; });
+	for (var i = samples.length - 1; i > 0; i--)
+		if (samples[i].t === samples[i - 1].t) samples.splice(i, 1);
+	return samples.slice(-HIST_WINDOW);
 }
 
-var freqHistory = loadFreqHistory();
+/* Both parsers return null - not an empty array - when the payload is missing
+ * or unusable, so the caller can keep the curve that is already on screen: one
+ * failed poll must never blank 120 valid points. */
+function parseFreqHistory(raw) {
+	if (!Array.isArray(raw)) return null;
+	var out = [];
+	for (var i = 0; i < raw.length; i++) {
+		var s = raw[i];
+		if (!Array.isArray(s)) continue;
+		var t = histNum(s[0]), v = histNum(s[1]);
+		if (!t || !v || v <= 0) continue;
+		out.push({ t: t * 1000, v: v });
+	}
+	return histNormalise(out);
+}
 
-function pushFreqSample(khz) {
-	khz = Number(khz);
-	if (!isFinite(khz) || !(khz > 0)) return;
-	freqHistory.push({ t: Date.now(), v: khz });
-	if (freqHistory.length > FREQ_HISTORY_MAX) freqHistory.shift();
-	saveFreqHistory();
+function parseLoadHistory(raw) {
+	if (!Array.isArray(raw)) return null;
+	var out = [];
+	for (var i = 0; i < raw.length; i++) {
+		var s = raw[i];
+		if (!Array.isArray(s) || !Array.isArray(s[1])) continue;
+		var t = histNum(s[0]);
+		if (!t) continue;
+		var u = [];
+		for (var c = 0; c < s[1].length; c++) {
+			var v = histNum(s[1][c]);
+			/* null marks a core that was not measurable in that interval
+			 * (hotplug, or a counter that went backwards): the line breaks
+			 * there instead of being drawn through a fake 0. */
+			u.push(v === null ? null : Math.min(100, Math.max(0, v)));
+		}
+		if (!u.length) continue;
+		out.push({ t: t * 1000, u: u });
+	}
+	return histNormalise(out);
+}
+
+function adoptHistory(st) {
+	var h = st && st.cpu_history;
+	if (!h) return;
+	var f = parseFreqHistory(h.freq);
+	var l = parseLoadHistory(h.load);
+	if (f) freqHistory = f;
+	if (l) loadHistory = l;
 }
 
 /* LuCI's E() uses document.createElement() and cannot create SVG-namespace
@@ -514,28 +549,64 @@ function renderFreqChart(min, max, containerW) {
 	var H = 240, padX = 6, padT = 14, padB = 6;
 	var innerW = W - padX * 2, innerH = H - padT - padB;
 	var span = hi - lo;
+	function xOf(i) { return padX + (HIST_WINDOW - n + i) / (HIST_WINDOW - 1) * innerW; }
 	function yOf(f) {
 		var c = Math.min(Math.max(f, lo), hi);
 		return padT + innerH - (c - lo) / span * innerH;
 	}
-	var pts = [], xs = [], ys = [];
+	var xs = [], ys = [];
 	for (var i = 0; i < n; i++) {
-		var x = padX + (FREQ_HISTORY_MAX - n + i) / (FREQ_HISTORY_MAX - 1) * innerW;
-		var y = yOf(freqHistory[i].v);
-		xs.push(x); ys.push(y);
-		pts.push(x.toFixed(1) + ',' + y.toFixed(1));
+		xs.push(xOf(i));
+		ys.push(yOf(freqHistory[i].v));
 	}
-	var hoverXs = xs.slice(), hoverYs = ys.slice();
-	if (n === 1) { xs.unshift(padX); ys.unshift(ys[0]); pts.unshift(padX + ',' + ys[0].toFixed(1)); }
-	/* Close the area fill at the first/last data x, not the chart edges,
-	 * otherwise the polygon diagonal streaks across empty space. */
-	var area = pts.slice();
-	area.push(xs[xs.length - 1].toFixed(1) + ',' + (padT + innerH));
-	area.unshift(xs[0].toFixed(1) + ',' + (padT + innerH));
+
+	/* Split into runs of consecutive samples. A run boundary is unmeasured
+	 * time, and the plot has to show it as a break - a single polyline over
+	 * the whole buffer would bridge an hour of nothing as if it were five
+	 * seconds. */
+	var runs = [], run = [];
+	for (var i = 0; i < n; i++) {
+		if (i && freqHistory[i].t - freqHistory[i - 1].t > HIST_GAP_MS) { runs.push(run); run = []; }
+		run.push(i);
+	}
+	if (run.length) runs.push(run);
+
+	var body = [];
+	for (var r = 0; r < runs.length; r++) {
+		var idx = runs[r], pts = [];
+		for (var k = 0; k < idx.length; k++)
+			pts.push(xs[idx[k]].toFixed(1) + ',' + ys[idx[k]].toFixed(1));
+		/* A lone sample has no span to stroke: draw the dot only. The old
+		 * chart stretched it into a full-width line, which read as ten minutes
+		 * of steady history on the very first poll. The newest sample already
+		 * gets the head dot below, so it is not drawn twice. */
+		if (idx.length === 1) {
+			if (idx[0] !== n - 1)
+				body.push(svgEl('circle', {
+					'cx': xs[idx[0]].toFixed(1), 'cy': ys[idx[0]].toFixed(1),
+					'r': '2.5', 'style': 'fill:var(--ds-ok)'
+				}));
+			continue;
+		}
+		/* Close each area at its own ends, not the chart edges, otherwise the
+		 * polygon streaks diagonally across a gap or across empty space. */
+		var area = pts.slice();
+		area.push(xs[idx[idx.length - 1]].toFixed(1) + ',' + (padT + innerH));
+		area.unshift(xs[idx[0]].toFixed(1) + ',' + (padT + innerH));
+		body.push(svgEl('polygon', { 'points': area.join(' '), 'style': 'fill:var(--ds-ok);opacity:.12;stroke:none' }));
+		body.push(svgEl('polyline', {
+			'points': pts.join(' '),
+			'style': 'fill:none;stroke:var(--ds-ok);stroke-width:2;stroke-linejoin:round;stroke-linecap:round'
+		}));
+	}
+	/* Head dot on the newest sample, whatever run it belongs to. */
+	body.push(svgEl('circle', {
+		'cx': xs[n - 1].toFixed(1), 'cy': ys[n - 1].toFixed(1),
+		'r': '3', 'style': 'fill:var(--ds-ok)'
+	}));
 
 	var gridStyle = 'stroke:var(--ds-border);stroke-width:1;stroke-dasharray:3 3';
 	var lblStyle = 'fill:var(--ds-text-muted);font-size:9px;font-family:var(--ds-mono)';
-	var last = pts[pts.length - 1].split(',');
 	var svg = svgEl('svg', {
 		'viewBox': '0 0 ' + W + ' ' + H,
 		'width': '100%', 'height': H,
@@ -545,21 +616,15 @@ function renderFreqChart(min, max, containerW) {
 		svgEl('line', { 'x1': padX, 'y1': padT, 'x2': W - padX, 'y2': padT, 'style': gridStyle }),
 		svgEl('line', { 'x1': padX, 'y1': padT + innerH, 'x2': W - padX, 'y2': padT + innerH, 'style': gridStyle }),
 		svgEl('text', { 'x': padX + 2, 'y': padT - 4, 'style': lblStyle }, [ document.createTextNode(aui.fmtFreq(hi)) ]),
-		svgEl('text', { 'x': padX + 2, 'y': padT + innerH - 4, 'style': lblStyle }, [ document.createTextNode(aui.fmtFreq(lo)) ]),
-		svgEl('polygon', { 'points': area.join(' '), 'style': 'fill:var(--ds-ok);opacity:.12;stroke:none' }),
-		svgEl('polyline', {
-			'points': pts.join(' '),
-			'style': 'fill:none;stroke:var(--ds-ok);stroke-width:2;stroke-linejoin:round;stroke-linecap:round'
-		}),
-		svgEl('circle', { 'cx': last[0], 'cy': last[1], 'r': '3', 'style': 'fill:var(--ds-ok)' })
-	]);
+		svgEl('text', { 'x': padX + 2, 'y': padT + innerH - 4, 'style': lblStyle }, [ document.createTextNode(aui.fmtFreq(lo)) ])
+	].concat(body));
 	var wrap = E('div', { 'style': 'position:relative' }, [ svg ]);
 	attachChartHover({
-		svg: svg, wrap: wrap, xs: hoverXs,
+		svg: svg, wrap: wrap, xs: xs,
 		guideTop: padT, guideBottom: padT + innerH,
 		dotColors: [ 'var(--ds-ok)' ],
 		time: function(i) { return freqHistory[i].t; },
-		points: function(i) { return [ { x: hoverXs[i], y: hoverYs[i] } ]; },
+		points: function(i) { return [ { x: xs[i], y: ys[i] } ]; },
 		rows: function(i) { return [ { value: aui.fmtFreq(freqHistory[i].v), color: 'var(--ds-ok)' } ]; }
 	});
 	return wrap;
@@ -568,165 +633,21 @@ function renderFreqChart(min, max, containerW) {
 /* ── CPU usage history chart ──
  * The frequency curve answers "how fast are the cores running", which only
  * becomes readable next to "how busy were they"; this card is that second half.
- * The backend publishes the kernel's cumulative per-CPU jiffies (/proc/stat)
- * and nothing else, because a utilisation percentage needs two samples: the
- * reader keeps the previous snapshot and differentiates it on every 5 s poll.
- * Keeping the arithmetic here leaves the RPC stateless, so two open tabs - or a
- * reloaded one - each measure their own interval instead of overwriting a
- * shared /tmp baseline.
+ *
+ * A utilisation percentage needs two /proc/stat snapshots, and the backend
+ * owns both: it keeps the previous reference in /tmp, differentiates it on the
+ * 5 s poll and publishes the finished percentages here. The view therefore
+ * holds no baseline and no clock - which is what makes a reload, a second tab
+ * and a reopened tab agree instead of each measuring its own interval.
  *
  * A sample is one array entry per core (index = core number, so the chart can
  * draw one coloured line per thread). A null entry marks a core that was not
  * measurable in that interval (hotplug, or a counter that went backwards): the
  * line breaks there rather than being drawn through a fake 0.
  */
-var LOAD_HISTORY_KEY = 'airoha_npu.cpu_load_history';
-var LOAD_BASELINE_KEY = 'airoha_npu.cpu_load_baseline';
-
 function isPercent(v) {
 	return typeof v === 'number' && isFinite(v) && v >= 0 && v <= 100;
 }
-
-function restoreLoadHistory() {
-	var now = Date.now();
-	try {
-		var raw = sessionStorage.getItem(LOAD_HISTORY_KEY);
-		if (!raw) return [];
-		var samples = JSON.parse(raw);
-		if (!Array.isArray(samples)) return [];
-		return samples.filter(function(sample) {
-			return sample && typeof sample === 'object' &&
-				typeof sample.t === 'number' && isFinite(sample.t) && sample.t > 0 &&
-				Array.isArray(sample.u) && sample.u.length > 0 &&
-				sample.u.every(function(v) { return v === null || isPercent(v); }) &&
-				sample.t >= now - FREQ_HISTORY_MAX_AGE_MS;
-		}).slice(-FREQ_HISTORY_MAX);
-	} catch (err) {
-		// Storage can be disabled (including privacy modes) or hold stale data.
-		return [];
-	}
-}
-
-function saveLoadHistory() {
-	try {
-		sessionStorage.setItem(LOAD_HISTORY_KEY, JSON.stringify(loadHistory));
-	} catch (err) {
-		// A denied or full storage area must never stop the five-second poll.
-	}
-}
-
-/* The previous /proc/stat snapshot, as [total, idle] pairs (compact on purpose:
- * it is rewritten on every poll). Restored across a reload so the curve
- * continues instead of waiting one interval for its first point. */
-function restoreLoadBaseline() {
-	var now = Date.now();
-	try {
-		var raw = sessionStorage.getItem(LOAD_BASELINE_KEY);
-		if (!raw) return null;
-		var base = JSON.parse(raw);
-		if (!base || typeof base !== 'object' ||
-			typeof base.t !== 'number' || !(base.t > 0) ||
-			base.t < now - FREQ_HISTORY_MAX_AGE_MS) return null;
-		var ticks = base.ticks;
-		if (!Array.isArray(ticks) || !ticks.length) return null;
-		var ok = ticks.every(function(p) {
-			return Array.isArray(p) && p.length === 2 &&
-				typeof p[0] === 'number' && isFinite(p[0]) && p[0] > 0 &&
-				typeof p[1] === 'number' && isFinite(p[1]) && p[1] >= 0 && p[1] <= p[0];
-		});
-		return ok ? { t: base.t, ticks: ticks } : null;
-	} catch (err) {
-		return null;
-	}
-}
-
-function saveLoadBaseline() {
-	try {
-		sessionStorage.setItem(LOAD_BASELINE_KEY, JSON.stringify(loadBaseline));
-	} catch (err) {
-		// Same as above: persistence is best-effort, never fatal.
-	}
-}
-
-var loadHistory = restoreLoadHistory();
-var loadBaseline = restoreLoadBaseline();
-
-/* Normalise the backend's [{"total":N,"idle":M}, ...] into [N, M] pairs.
- * Anything that is not a plausible monotonic counter reading rejects the whole
- * snapshot: a half-parsed core would silently skew that core's curve. */
-function tickPairs(ticks) {
-	if (!Array.isArray(ticks) || !ticks.length) return null;
-	var pairs = [];
-	for (var i = 0; i < ticks.length; i++) {
-		var tick = ticks[i] || {};
-		var total = Number(tick.total), idle = Number(tick.idle);
-		if (!isFinite(total) || !isFinite(idle) || total <= 0 || idle < 0 || idle > total)
-			return null;
-		pairs.push([total, idle]);
-	}
-	return pairs;
-}
-
-/* Fold one /proc/stat snapshot into the history. Returns true when it produced
- * a usage point (the first snapshot can only become the baseline). A counter
- * that went backwards means the board rebooted: the old curve described a
- * different uptime, so it is discarded instead of being continued. */
-function pushLoadSample(ticks) {
-	var current = tickPairs(ticks);
-	if (!current) return false;
-
-	var now = Date.now();
-	var base = loadBaseline;
-	var sample = null, reboot = false;
-
-	if (base && base.ticks.length) {
-		var usage = [], measured = false;
-		for (var i = 0; i < current.length; i++) {
-			var prev = base.ticks[i];
-			var dTotal = prev ? current[i][0] - prev[0] : 0;
-			var dIdle = prev ? current[i][1] - prev[1] : 0;
-			if (dTotal < 0) { reboot = true; break; }
-			if (dTotal > 0 && dIdle >= 0 && dIdle <= dTotal) {
-				usage.push(Math.round((1 - dIdle / dTotal) * 1000) / 10);
-				measured = true;
-			} else {
-				usage.push(null);
-			}
-		}
-		if (reboot) {
-			loadHistory = [];
-			saveLoadHistory();
-		} else if (measured) {
-			sample = { t: now, u: usage };
-		}
-	}
-
-	loadBaseline = { t: now, ticks: current };
-	saveLoadBaseline();
-
-	if (!sample) return false;
-	loadHistory.push(sample);
-	if (loadHistory.length > FREQ_HISTORY_MAX) loadHistory.shift();
-	saveLoadHistory();
-	return true;
-}
-
-/* A fresh tab has no previous snapshot, so the first usage point would only
- * appear on the second poll. One extra getStatus ~1.2 s after the first reply
- * gives the curve a real (short-window) first point immediately. Armed at most
- * once per page load, and it is the cheap RPC - not another getDashboard. */
-var loadSeedTimer = null;
-function armLoadSeed() {
-	if (loadSeedTimer !== null) return;
-	loadSeedTimer = setTimeout(function() {
-		loadSeedTimer = null;
-		callNpuStatus().then(function(st) {
-			if (!st || !pushLoadSample(st.cpu_ticks)) return;
-			renderLoadHistoryCard();
-		}).catch(function() {});
-	}, 1200);
-}
-
 /* Palette + dash policy for the per-core series (see ds-tokens.js). Every entry
  * carries a literal fallback inside the var(): these boards are deployed by
  * hand, so a stale ds-tokens.js can outlive this file, and an unresolvable
@@ -785,7 +706,7 @@ function renderLoadChart(containerW) {
 	var W = Math.round(containerW > 0 ? containerW : 600);
 	var H = 240, padX = 6, padT = 14, padB = 6;
 	var innerW = W - padX * 2, innerH = H - padT - padB;
-	function xOf(i) { return padX + (FREQ_HISTORY_MAX - n + i) / (FREQ_HISTORY_MAX - 1) * innerW; }
+	function xOf(i) { return padX + (HIST_WINDOW - n + i) / (HIST_WINDOW - 1) * innerW; }
 	function yOf(pct) { return padT + innerH - aui.clampPct(pct) / 100 * innerH; }
 
 	var gridStyle = 'stroke:var(--ds-border);stroke-width:1;stroke-dasharray:3 3';
@@ -809,6 +730,11 @@ function renderLoadChart(containerW) {
 	for (var c = 0; c < cores; c++) {
 		var segs = [], seg = [];
 		for (var i = 0; i < n; i++) {
+			/* A run boundary is unmeasured time, exactly like an unmeasurable
+			 * core: break the line instead of bridging it. */
+			if (i && loadHistory[i].t - loadHistory[i - 1].t > HIST_GAP_MS) {
+				if (seg.length) { segs.push(seg); seg = []; }
+			}
 			var v = loadHistory[i].u[c];
 			if (!isPercent(v)) {
 				if (seg.length) { segs.push(seg); seg = []; }
@@ -1921,17 +1847,13 @@ return view.extend({
 			var ci = document.getElementById('cpu-info-content');
 			if (ci) { ci.innerHTML = ''; ci.appendChild(renderCpuInfo(st)); }
 
-			// History charts — one sample per poll each. The frequency curve has
-			// its point immediately; the usage curve needs two /proc/stat
-			// snapshots, so the first poll only records the baseline.
-			pushFreqSample(freqState(st).freq);
+			// History charts — the backend sampled both ring buffers as part of
+			// this very reply, so the curves track the same poll that updated
+			// the live values above. No extra RPC, no storage, no seeding.
+			adoptHistory(st);
 			var hc = document.getElementById('cpu-history-content');
 			if (hc) { hc.innerHTML = ''; hc.appendChild(renderFreqChart(st.cpu_min_freq, st.cpu_max_freq, hc.clientWidth)); }
-
-			var hadLoadBaseline = !!loadBaseline;
-			var newLoadSample = pushLoadSample(st.cpu_ticks);
 			renderLoadHistoryCard();
-			if (!hadLoadBaseline && !newLoadSample) armLoadSeed();
 
 			// Control settings — the selects now always exist, so their presence can
 			// no longer signal "not rendered yet". Rebuild the container whenever the
