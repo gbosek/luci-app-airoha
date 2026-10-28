@@ -35,6 +35,7 @@
 
 var PROBE = '/usr/libexec/clients-probe';
 var SNAPSHOT_PATH = '/tmp/clients-snapshot.json';
+var SAMPLES_PATH = '/tmp/clients-samples.json';
 var HISTORY_PATH = '/tmp/clients-history.json';
 var DNS_ARCHIVE = '/tmp/clients-dns.json';
 var STYLESHEET = 'view/status/clients/clients.css';
@@ -45,6 +46,12 @@ var STYLESHEET = 'view/status/clients/clients.css';
 var SAMPLE_INTERVAL = 5;
 var LEASE_INTERVAL = 30;
 var HISTORY_INTERVAL = 30;
+
+/* How often the fast ring is read. The tick behind it runs every two seconds,
+ * so this is the shortest interval that can still show every sample; the
+ * snapshot is still read on SAMPLE_INTERVAL, it just no longer paces the
+ * tiles. */
+var TICK_INTERVAL = 2;
 
 /* Fallback path only: a gap this long means the tab was hidden or the timer was
  * throttled, and dividing the accumulated bytes by it would invent a spike, so
@@ -951,12 +958,27 @@ function sortValue(entry, key) {
  * same frames are in the figures by construction - adding them again would
  * count them twice.
  */
+/*
+ * The chart places points by their timestamp, and it mixes two sources that
+ * were written by different hands: the snapshot's trend is stamped in seconds,
+ * the points this page builds itself are in milliseconds. Normalising here
+ * keeps the axis monotonic and makes the window selector mean something -
+ * comparing second-stamps against a millisecond cutoff used to keep every point
+ * the file had, so all three windows drew the same thirty minutes.
+ */
+function toMs(value) {
+	var t = Number(value) || 0;
+
+	/* Anything before the year 5138 is seconds. */
+	return (t > 0 && t < 1e11) ? t * 1000 : t;
+}
+
 function decodeTrendPoint(point, viaPorts) {
 	var intra = (point.intra != null) ? (Number(point.intra) || 0) : 0;
 	var extra = viaPorts ? 0 : intra;
 
 	var decoded = {
-		t: Number(point.t) || 0,
+		t: toMs(point.t),
 		valid: point.valid !== false,
 		lanUp: (point.lanUp || 0) + extra,
 		lanDown: (point.lanDown || 0) + extra,
@@ -981,6 +1003,36 @@ function decodeTrendPoint(point, viaPorts) {
 	});
 
 	return decoded;
+}
+
+/*
+ * One row of the fast ring, in the shape decodeTrendPoint() returns:
+ *
+ *   [ ts, wanUp, wanDown, lanUp, lanDown, intra, window ]
+ *
+ * `intra` is -1 where the box has no such counter, and `window` is zero on a
+ * tick that had no baseline - such a point is marked invalid so the chart
+ * breaks the line there instead of drawing a drop to zero. There is no
+ * per-device split in a row: the ring carries the four tile figures only, so
+ * the device selector keeps reading the snapshot's series.
+ */
+function decodeSampleRow(row, viaPorts) {
+	if (!Array.isArray(row) || row.length < 7)
+		return null;
+
+	var intra = (Number(row[5]) >= 0) ? (Number(row[5]) || 0) : 0;
+	var extra = viaPorts ? 0 : intra;
+
+	return {
+		t: toMs(row[0]),
+		valid: (Number(row[6]) || 0) > 0,
+		lanUp: (Number(row[3]) || 0) + extra,
+		lanDown: (Number(row[4]) || 0) + extra,
+		wanUp: Number(row[1]) || 0,
+		wanDown: Number(row[2]) || 0,
+		intra: (Number(row[5]) >= 0) ? intra : null,
+		byMac: Object.create(null)
+	};
 }
 
 function zeroCounters() {
@@ -1024,6 +1076,17 @@ function createStore() {
 		/* True while the trend series comes from the collector's file rather
 		 * than from points this page built. */
 		trendFromFile: false,
+		/* The snapshot's own series, kept apart from `trend` so the fast ring
+		 * can be laid over its newest part: the two overlap in time and each
+		 * has to be able to replace the other without rebuilding from a merged
+		 * array it cannot take apart again. */
+		trendCoarse: null,
+		/* The fast ring, decoded, and the timestamp of the newest row already
+		 * applied. A ring is a state rather than a stream - reading it returns
+		 * everything it holds - so this is not a cursor; it only stops the same
+		 * sample from being applied twice. */
+		ring: null,
+		ringTs: 0,
 		/* False until a snapshot carried a real measurement window. The first
 		 * rate of a session is unknown, not zero - marking the point lets the
 		 * trend chart break the line there instead of drawing the fake rise
@@ -1033,6 +1096,7 @@ function createStore() {
 		 * trend point came from. A poll that lands between two collector
 		 * passes must not apply or plot the same numbers again. */
 		lastSnapshotTs: 0,
+		lastSnapshotLoad: 0,
 		lastTrendTs: 0,
 		lastLeaseLoad: 0,
 		lastHistoryLoad: 0,
@@ -1062,6 +1126,8 @@ function createStore() {
 		fetchSnapshot: function() {
 			var self = this;
 
+			self.lastSnapshotLoad = Date.now();
+
 			return L.resolveDefault(fs.read(SNAPSHOT_PATH), '').then(function(text) {
 				var data = null;
 
@@ -1082,6 +1148,125 @@ function createStore() {
 					return self.applySnapshot(JSON.parse(output));
 				});
 			});
+		},
+
+		/*
+		 * Read the fast ring. This is the cheap file - the only thing in it is
+		 * the four tile figures per tick plus the bookkeeping the next tick
+		 * differences against - so it is read on the short interval while the
+		 * snapshot keeps its own, slower one. An older probe or a box where the
+		 * tick loop is switched off leaves no file, and the tiles then fall
+		 * back to the snapshot's rates with nothing else changed.
+		 */
+		fetchSamples: function() {
+			var self = this;
+
+			return L.resolveDefault(fs.read(SAMPLES_PATH), '').then(function(text) {
+				var data = null;
+
+				try {
+					data = text ? JSON.parse(text) : null;
+				}
+				catch (e) {
+					data = null;
+				}
+
+				return self.applySamples(data);
+			});
+		},
+
+		/*
+		 * Apply one ring document.
+		 *
+		 * The rows are already rates, so nothing is differenced here - the tick
+		 * did that against its own previous pass, which is the only place the
+		 * raw counters exist. What this has to get right is which side the
+		 * intra counter belonged to: the tick knows whether it measured a
+		 * bridge, and on a bridge those frames are already inside the port
+		 * counters.
+		 */
+		applySamples: function(data) {
+			if (!data || !Array.isArray(data.samples) || !data.samples.length)
+				return null;
+
+			var newest = data.samples[data.samples.length - 1];
+			var ts = Number(newest[0]) || 0;
+
+			if (ts <= this.ringTs)
+				return null;
+
+			var viaPorts = (data.bridge === true);
+			var ring = [];
+
+			data.samples.forEach(function(row) {
+				var point = decodeSampleRow(row, viaPorts);
+
+				if (point != null)
+					ring.push(point);
+			});
+
+			if (!ring.length)
+				return null;
+
+			this.ringTs = ts;
+			this.ring = ring;
+			this.rebuildTrend();
+
+			return ring[ring.length - 1];
+		},
+
+		/*
+		 * The chart reads one series, built from the two files on every change
+		 * rather than appended to: the snapshot replaces its whole series each
+		 * pass, so anything appended here would be wiped ten seconds later.
+		 *
+		 * The ring wins wherever it reaches - it is measured every couple of
+		 * seconds against the snapshot's ten - and everything older comes from
+		 * the snapshot, which is the only source that reaches back far enough
+		 * for the 25 minute window.
+		 */
+		rebuildTrend: function() {
+			var coarse = this.trendCoarse;
+
+			/* Without a series from the collector the chart is built from
+			 * points this page made, and there is nothing to merge into. */
+			if (!coarse) {
+				if (!this.trend)
+					this.trend = [];
+
+				return;
+			}
+
+			var ring = this.ring || [];
+
+			if (!ring.length) {
+				this.trend = coarse;
+				return;
+			}
+
+			var cut = ring[0].t;
+
+			this.trend = coarse.filter(function(point) {
+				return point.t < cut;
+			}).concat(ring);
+		},
+
+		/*
+		 * The tile figures: the newest ring row that actually measured
+		 * something. A tick with no baseline is skipped rather than treated as
+		 * zero, so a restart does not make the tiles flash empty.
+		 */
+		liveScopes: function() {
+			var ring = this.ring;
+
+			if (!ring || !ring.length)
+				return null;
+
+			for (var i = ring.length - 1; i >= 0; i--)
+				if (ring[i].valid)
+					return ring[i];
+
+			return null;
 		},
 
 		/*
@@ -1135,10 +1320,14 @@ function createStore() {
 			 * from devices where the collector cannot count it. */
 			self.state.intra = (data.intra && data.intra.ok === true) ? data.intra : null;
 
-			if (self.trendFromFile)
-				self.trend = data.trend.map(function(point) {
+			if (self.trendFromFile) {
+				self.trendCoarse = data.trend.map(function(point) {
 					return decodeTrendPoint(point, !!(bridge && bridge.mode));
 				});
+
+				/* The ring, if there is one, is laid over the newest part. */
+				self.rebuildTrend();
+			}
 
 			self.state.interfaces = data.interfaces || [];
 			self.state.arp = data.arp || [];
@@ -1478,13 +1667,17 @@ function loadOUI() {
 var Common = L.Class.extend({
 	PROBE: PROBE,
 	SNAPSHOT_PATH: SNAPSHOT_PATH,
+	SAMPLES_PATH: SAMPLES_PATH,
 	HISTORY_PATH: HISTORY_PATH,
 	DNS_ARCHIVE: DNS_ARCHIVE,
 	STYLESHEET: STYLESHEET,
 	SAMPLE_INTERVAL: SAMPLE_INTERVAL,
+	TICK_INTERVAL: TICK_INTERVAL,
 	LEASE_INTERVAL: LEASE_INTERVAL,
 	HISTORY_INTERVAL: HISTORY_INTERVAL,
 	TREND_POINTS: TREND_POINTS,
+	decodeTrendPoint: decodeTrendPoint,
+	decodeSampleRow: decodeSampleRow,
 	sourceTitle: sourceTitle,
 	normalizeMAC: normalizeMAC,
 	autoUnit: autoUnit,

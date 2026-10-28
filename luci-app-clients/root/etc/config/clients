@@ -20,6 +20,17 @@ config clients 'global'
 	option live_interval '10'
 	# The snapshot the page reads, also in /tmp for the same reason.
 	option snapshot_path '/tmp/clients-snapshot.json'
+	# How often the overview tiles are measured, on their own cheaper clock.
+	# The full snapshot above costs about half a second a pass, so it cannot
+	# run often enough to look live; this loop leaves out the roster, wireless
+	# and the names and writes a short ring of samples instead. 2 s costs
+	# roughly 0.34 s of CPU per pass on an AN7581 - raise it to 5 or 10 if the
+	# box is busier than it is interesting to watch. 0 switches the loop off
+	# and the tiles fall back to the snapshot's own cadence.
+	option tick_interval '2'
+	# The ring the page reads for the tiles and the fine-grained part of the
+	# chart, in /tmp like the rest.
+	option samples_path '/tmp/clients-samples.json'
 	# Ceiling in bytes for each cache file this app keeps in /tmp (history,
 	# snapshot, DNS archive, snoop table, PTR cache). A file that grows past
 	# it drops its least useful rows before being written, so the worst case

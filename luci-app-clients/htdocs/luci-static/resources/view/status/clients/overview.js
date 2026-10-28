@@ -162,40 +162,57 @@ return L.Class.extend({
 			summary.lanTotalDown = l2Totals.lanDown;
 			summary.wanTotalUp = l2Totals.wanUp;
 			summary.wanTotalDown = l2Totals.wanDown;
+		}
+		else {
+			clients.forEach(function(entry) {
+				if (!entry.rate)
+					return;
 
-			return summary;
+				summary.lanUp += entry.rate.lanUp || 0;
+				summary.lanDown += entry.rate.lanDown || 0;
+				summary.wanUp += entry.rate.wanUp || 0;
+				summary.wanDown += entry.rate.wanDown || 0;
+
+				summary.lanTotalUp += entry.total.lanUp || 0;
+				summary.lanTotalDown += entry.total.lanDown || 0;
+				summary.wanTotalUp += entry.total.wanUp || 0;
+				summary.wanTotalDown += entry.total.wanDown || 0;
+			});
+
+			/* Client-to-client traffic is LAN traffic, so it is added here
+			 * rather than shown as a figure of its own - that is what the tile
+			 * means by "LAN", and Total picks it up through the same sum. It
+			 * has no direction, so it goes under both arrows, the way a
+			 * switched frame always shows up as rx on one port and tx on
+			 * another.
+			 *
+			 * Not on a bridge: there the port counters behind the branch above
+			 * already contain those frames. */
+			var intra = this.store.state.intra;
+
+			if (intra && intra.ok === true) {
+				summary.lanUp += intra.rate || 0;
+				summary.lanDown += intra.rate || 0;
+				summary.lanTotalUp += intra.total || 0;
+				summary.lanTotalDown += intra.total || 0;
+			}
 		}
 
-		clients.forEach(function(entry) {
-			if (!entry.rate)
-				return;
+		/*
+		 * The fast ring, where the box has one, replaces the four rates - and
+		 * only the rates: it carries no running totals, so the figures in
+		 * brackets stay on the snapshot's clock. The ring is measured every
+		 * couple of seconds against the snapshot's ten, which is the whole
+		 * reason it exists; leaving the snapshot's numbers here would make the
+		 * finer series in the chart disagree with the tile that sits above it.
+		 */
+		var live = this.store.liveScopes();
 
-			summary.lanUp += entry.rate.lanUp || 0;
-			summary.lanDown += entry.rate.lanDown || 0;
-			summary.wanUp += entry.rate.wanUp || 0;
-			summary.wanDown += entry.rate.wanDown || 0;
-
-			summary.lanTotalUp += entry.total.lanUp || 0;
-			summary.lanTotalDown += entry.total.lanDown || 0;
-			summary.wanTotalUp += entry.total.wanUp || 0;
-			summary.wanTotalDown += entry.total.wanDown || 0;
-		});
-
-		/* Client-to-client traffic is LAN traffic, so it is added here rather
-		 * than shown as a figure of its own - that is what the tile means by
-		 * "LAN", and Total picks it up through the same sum. It has no
-		 * direction, so it goes under both arrows, the way a switched frame
-		 * always shows up as rx on one port and tx on another.
-		 *
-		 * Not on a bridge: there the port counters behind the branch above
-		 * already contain those frames. */
-		var intra = this.store.state.intra;
-
-		if (intra && intra.ok === true) {
-			summary.lanUp += intra.rate || 0;
-			summary.lanDown += intra.rate || 0;
-			summary.lanTotalUp += intra.total || 0;
-			summary.lanTotalDown += intra.total || 0;
+		if (live) {
+			summary.lanUp = live.lanUp;
+			summary.lanDown = live.lanDown;
+			summary.wanUp = live.wanUp;
+			summary.wanDown = live.wanDown;
 		}
 
 		return summary;
@@ -694,7 +711,15 @@ return L.Class.extend({
 			if (document.hidden || this.hidden)
 				return Promise.resolve();
 
-			jobs = [ this.store.fetchSnapshot() ];
+			/* The ring is the cheap read and sets the pace. The snapshot is
+			 * still read, on its own slower interval: it is the roster - eighty
+			 * kilobytes of clients, addresses and names - and parsing that
+			 * every two seconds would cost more than the fresher figure is
+			 * worth. */
+			jobs = [ this.store.fetchSamples() ];
+
+			if ((Date.now() - this.store.lastSnapshotLoad) >= common.SAMPLE_INTERVAL * 1000)
+				jobs.push(this.store.fetchSnapshot());
 
 			if ((Date.now() - this.store.lastLeaseLoad) >= common.LEASE_INTERVAL * 1000)
 				jobs.push(this.store.fetchLeases());
@@ -707,7 +732,7 @@ return L.Class.extend({
 			}).catch(function(error) {
 				L.error(error);
 			});
-		}, this), common.SAMPLE_INTERVAL);
+		}, this), common.TICK_INTERVAL);
 
 	var bridgeMode = !!(this.store.state.bridge && this.store.state.bridge.mode);
 

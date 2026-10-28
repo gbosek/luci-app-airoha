@@ -41,6 +41,7 @@ nothing here starts a measurement, and nothing polls a daemon over a socket.
 | `iwinfo` assoclist | SSID, band, signal, noise | `clients-probe` |
 | bridge snooping | IPv4 assignment evidence, IPv6 addresses learned from neighbour discovery | `clients-snoop`, long-running |
 | live snapshot | everything above, with the counters already turned into rates and running totals | `clients-probe collect`, every 10 s |
+| fast ring | the four overview tile figures, on their own cheaper clock | `clients-probe tick`, every 2 s |
 | archive | first / last seen, last known association and name | `clients-probe collect`, every 30 s |
 | dnsmasq query log | DNS records with response time and result | `clients-dns collect`, every 10 s |
 | nftables bridge counter | traffic between two clients of the same subnet, which nothing else sees | `clients-probe intra-setup`, once at service start |
@@ -59,6 +60,42 @@ a sample.
 `clients-probe` with no argument still prints a live snapshot and exits, and the
 page falls back to it - differencing the counters locally - when the file is
 missing because the service is stopped.
+
+### Why there is a second, smaller file
+
+The snapshot answers "who is on my network", and answering that costs most of a
+second a pass - conntrack, ARP, `iwinfo`, `nlbwmon` and `nft`. Measured on
+target that is 0.47 s, so with the configured 10 s sleep it is rewritten every
+10.8 s, and anything reading it inherits that as its refresh rate. The four
+tiles at the top of the page do not need the roster, so `clients-probe tick`
+runs the cheap half on a 2 s clock and writes `/tmp/clients-samples.json`: one
+row per tick with the four scope rates, the inner-LAN rate and the window they
+were divided by, plus the counters the next tick differences against.
+
+Two files, two writers. They are not merged into one because two processes
+renaming over each other would lose a whole collection pass whenever they
+collide, and a sidecar of a few kilobytes costs less than the lock that sharing
+would need.
+
+The page reads the ring on every poll and the snapshot on the slower one, then
+lays the ring's points over the newest part of the snapshot's series - the
+chart is one series, drawn from whichever source is fresher at that timestamp.
+A tick costs 0.34 s of CPU on an AN7581 (raised to 0.37 s when it has to walk
+conntrack as well), which is why `tick_interval` is a setting rather than a
+constant: at 2 s it is roughly a fifth of one core, at 10 s it disappears.
+
+Two details worth knowing before reading the numbers:
+
+- **The window is a moving average, not the last tick.** These counters are
+  reconciled in bursts, so a single 2 s baseline lands in a gap as often as not -
+  measured on target, an idle-looking network accumulated 80 KB one second and
+  nothing the next two. Dividing that by 2 s gives 40 KB/s, 0, 0, 40 KB/s: a
+  comb, not a measurement. The tick therefore sums the last `SAMPLE_SPAN` (6)
+  seconds of deltas and divides once, which hides the batch boundaries without
+  inventing traffic - every byte in the sum came out of a counter.
+- **The ring carries no per-device split.** It is four figures and nothing
+  else, so the device selector keeps reading the snapshot's series; only the
+  tile and the coarse shape of the chart move at the faster cadence.
 
 ### What the LAN figure counts
 
@@ -211,6 +248,8 @@ nlbw` query path is still present on the backend but nothing calls it.
 | `clients.global.history_path` | `/tmp/clients-history.json` | archive location |
 | `clients.global.live_interval` | `10` | seconds between live snapshot passes |
 | `clients.global.snapshot_path` | `/tmp/clients-snapshot.json` | location the pages read |
+| `clients.global.tick_interval` | `2` | seconds between tile measurements; `0` switches the fast ring off |
+| `clients.global.samples_path` | `/tmp/clients-samples.json` | location of the fast ring |
 | `clients.global.max_bytes` | `262144` | byte ceiling per cache file |
 | `clients.dns.enabled` | `1` | DNS collector on/off |
 | `clients.dns.interval` | `10` | seconds between log passes |
@@ -222,17 +261,20 @@ reboot - and update `acl.d/luci-app-clients.json` to match the new paths.
 
 ## Space used in /tmp
 
-`/tmp` is RAM, so the five files this package keeps there are all capped:
-`clients-history.json`, `clients-snapshot.json`, `clients-dns.json`,
-`clients-snoop.json` and `clients-ptr.json`. A document that would exceed
-`max_bytes` gives up rows before it is written - rates first, then the snooped
-hints, then whole client rows, the archive's oldest entries, and the DNS
-archive's oldest records - so the worst case is `max_bytes` per file instead of
-a function of how many addresses the network handed out. The ceiling is **per
-file**, so the hard worst case is five times `max_bytes` (1.25 MiB at the
-default) even though a real network never gets close: measured on a `/24` under
-normal use the five files total 270-290 KiB, most of it the DNS archive sitting
-just under its own 256 KiB.
+`/tmp` is RAM, so the six files this package keeps there are all capped:
+`clients-history.json`, `clients-snapshot.json`, `clients-samples.json`,
+`clients-dns.json`, `clients-snoop.json` and `clients-ptr.json`. A document that
+would exceed `max_bytes` gives up rows before it is written - rates first, then
+the snooped hints, then whole client rows, the archive's oldest entries, and the
+DNS archive's oldest records - so the worst case is `max_bytes` per file instead
+of a function of how many addresses the network handed out. The ceiling is **per
+file**, so the hard worst case is six times `max_bytes` (1.5 MiB at the default)
+even though a real network never gets close: measured on a `/24` under normal use
+the files total 270-290 KiB, most of it the DNS archive sitting just under its
+own 256 KiB.
+
+The fast ring is the smallest of them - 180 rows of eight numbers is about 8 KiB
+with its bookkeeping, rewritten every two seconds.
 
 The trend series is the largest single item in the snapshot - about 75 KiB with
 eight devices and a full 180 points on a routed box, and about 14 KiB on a

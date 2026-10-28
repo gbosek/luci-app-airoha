@@ -85,6 +85,18 @@
  * pass, the history only when it is due, and the stamp that decides it is kept
  * in the live file so the loop carries no state of its own.
  *
+ * The snapshot is a slow document by construction - it answers "who is on my
+ * network", which needs ARP, iw, nlbwmon and nft on top of the conntrack walk.
+ * Measured on target a pass costs 0.8 s, so with the configured 10 s sleep the
+ * file is rewritten every 10.8 s, and anything reading it inherits that as its
+ * refresh rate. The tiles only need four numbers out of it, so `tick` runs the
+ * cheap half on its own clock (2 s) and writes a short ring of samples to
+ * /tmp/clients-samples.json: conntrack for the scopes, the port counters on a
+ * bridging device, the intra counter, and nothing else. Two files, two writers
+ * - sharing one would put two renames in a race where the loser is a whole
+ * collection pass. The page consumes the ring by timestamp, so a poll that
+ * lands late still gets every sample it missed.
+ *
  * Every file written here is capped in bytes, not merely in rows: /tmp is RAM,
  * and a cache whose shape grows with the number of addresses seen would
  * eventually eat it. A document over `max_bytes` gives up its least interesting
@@ -113,6 +125,7 @@ const CONNTRACK_MAX = '/proc/sys/net/netfilter/nf_conntrack_max';
 
 const DEFAULT_HISTORY = '/tmp/clients-history.json';
 const DEFAULT_SNAPSHOT = '/tmp/clients-snapshot.json';
+const DEFAULT_SAMPLES = '/tmp/clients-samples.json';
 const SNOOP_FILE = '/tmp/clients-snoop.json';
 const DNS_FILE = '/tmp/clients-dns.json';
 
@@ -136,6 +149,21 @@ const TREND_POINTS = 180;
  * a convenience; an unbounded MAC -> 180 samples table would dwarf the snapshot
  * it lives in. */
 const TREND_MACS = 8;
+
+/* Points kept in the fast ring. At the 2 s tick the page runs this is six
+ * minutes, which covers the shortest window the chart offers (five) with room
+ * for a late tick, at a granularity the 10 s trend cannot express. */
+const SAMPLE_POINTS = 180;
+
+/* Width of the moving window the tick reports over. The counters behind it are
+ * reconciled in bursts of a few seconds, so a single tick is too thin a
+ * baseline to divide by - see the note in tick() for the measurement. */
+const SAMPLE_SPAN = 6;
+
+/* Hosts remembered between two ticks so the scopes can be differenced. The
+ * ring is RAM and one row is six numbers; the bound keeps a pathological
+ * address table from turning the smallest file here into a large one. */
+const SAMPLE_HOSTS = 256;
 
 /* A rate is only meaningful across a short window. If the collector was
  * stopped, suspended or simply ran late, the counters moved but the interval
@@ -806,21 +834,31 @@ function wifi_state() {
  * the classification below only has to find which side of the original tuple is
  * a LAN address.
  *
- * The line is aligned in columns, so splitting it on spaces produces a couple of
- * dozen tokens - most of them empty - per entry, and every intermediate table
- * costs an allocation. Scanning straight to the three keys we need avoids both.
+ * The scan walks key to key with index() and takes the token that follows it up
+ * to the next space. Measured on target (665 entries, AN7581): 135 ms here
+ * against 726 ms for the previous implementation, which stepped through the
+ * line one character at a time - ord() costs 6-12 us per call on this box, and
+ * an address token is a dozen of them. Splitting the whole line on spaces and
+ * picking tokens out costs 299 ms, so walking to the three keys we need is
+ * still the cheaper of the two, just not for the reason the old comment gave.
  */
+function token_at(line, from) {
+	let end = index(line, ' ', from);
+
+	return (end < 0) ? substr(line, from) : substr(line, from, end - from);
+}
+
 function split_tuple(line) {
 	let family;
+	let head = substr(line, 0, 4);
 
-	if (substr(line, 0, 4) == 'ipv4')
+	if (head == 'ipv4')
 		family = 4;
-	else if (substr(line, 0, 4) == 'ipv6')
+	else if (head == 'ipv6')
 		family = 6;
 	else
 		return null;
 
-	let len = length(line);
 	let tuples = [], pos = 0;
 
 	while (true) {
@@ -829,44 +867,27 @@ function split_tuple(line) {
 		if (src_at < 0)
 			break;
 
-		let start = src_at + 4;
-		let end = start;
-
-		while (end < len && ord(line, end) != 32)
-			end++;
-
-		let src = substr(line, start, end - start);
-		let dst = null, bytes = 0, cursor = end;
+		let src = token_at(line, src_at + 4);
+		let dst = null, bytes = 0, end = src_at + 4;
 
 		let dst_at = index(line, 'dst=', end);
 
 		if (dst_at >= 0) {
-			start = dst_at + 4;
-			end = start;
-
-			while (end < len && ord(line, end) != 32)
-				end++;
-
-			dst = substr(line, start, end - start);
+			dst = token_at(line, dst_at + 4);
+			end = dst_at + 4;
 		}
 
 		let bytes_at = index(line, 'bytes=', end);
 
 		if (bytes_at >= 0) {
-			start = bytes_at + 6;
-			end = start;
-
-			while (end < len && ord(line, end) != 32)
-				end++;
-
-			bytes = int(substr(line, start, end - start)) ?? 0;
-			cursor = end;
+			bytes = int(token_at(line, bytes_at + 6)) ?? 0;
+			end = bytes_at + 6;
 		}
 
 		push(tuples, { src: src, dst: dst, bytes: bytes });
 
 		/* Skip past this tuple's own counters so the next src= is the reply. */
-		pos = cursor;
+		pos = end;
 	}
 
 	return { family: family, tuples: tuples };
@@ -914,9 +935,45 @@ function account(hosts, ip, up, down, scope) {
 	hosts[ip] = entry;
 }
 
+/*
+ * Addresses repeat heavily inside one conntrack dump - a few dozen distinct
+ * addresses across several hundred flows - and parsing one of them costs around
+ * 90 us on target, because ord() alone is 6-12 us per character. One memo per
+ * dump turns the repeat into a hash lookup; the failure result is cached too,
+ * so a malformed address is not re-parsed for every flow that carries it.
+ */
+function parse_v4_memo(text, memo) {
+	if (text == null)
+		return null;
+
+	if (text in memo)
+		return memo[text];
+
+	let value = parse_v4(text);
+
+	memo[text] = value;
+
+	return value;
+}
+
+function parse_v6_memo(text, memo) {
+	if (text == null)
+		return null;
+
+	if (text in memo)
+		return memo[text];
+
+	let value = parse_v6(text);
+
+	memo[text] = value;
+
+	return value;
+}
+
 function traffic(subnets, local) {
 	let hosts = {};
 	let v4 = [], v6 = [];
+	let memo4 = {}, memo6 = {};
 
 	for (let subnet in subnets) {
 		if (subnet.family == 4)
@@ -947,8 +1004,8 @@ function traffic(subnets, local) {
 			continue;
 
 		if (flow.family == 4) {
-			let src = parse_v4(orig.src);
-			let dst = parse_v4(orig.dst);
+			let src = parse_v4_memo(orig.src, memo4);
+			let dst = parse_v4_memo(orig.dst, memo4);
 
 			if (src == null || dst == null)
 				continue;
@@ -958,14 +1015,14 @@ function traffic(subnets, local) {
 
 			if (is_src)
 				account(hosts, orig.src, orig.bytes, reply_bytes,
-					in_any_v4(v4, dst) ? 'lan' : 'wan');
+					is_dst ? 'lan' : 'wan');
 			else if (is_dst)
 				account(hosts, orig.dst, reply_bytes, orig.bytes,
-					in_any_v4(v4, src) ? 'lan' : 'wan');
+					is_src ? 'lan' : 'wan');
 		}
 		else {
-			let src = parse_v6(orig.src);
-			let dst = parse_v6(orig.dst);
+			let src = parse_v6_memo(orig.src, memo6);
+			let dst = parse_v6_memo(orig.dst, memo6);
 
 			if (src == null || dst == null)
 				continue;
@@ -975,10 +1032,10 @@ function traffic(subnets, local) {
 
 			if (is_src)
 				account(hosts, orig.src, orig.bytes, reply_bytes,
-					in_any_v6(v6, dst) ? 'lan' : 'wan');
+					is_dst ? 'lan' : 'wan');
 			else if (is_dst)
 				account(hosts, orig.dst, reply_bytes, orig.bytes,
-					in_any_v6(v6, src) ? 'lan' : 'wan');
+					is_src ? 'lan' : 'wan');
 		}
 	}
 
@@ -2432,6 +2489,268 @@ function snapshot_write(path, snap, max_bytes) {
 	return write_capped(path, snap, max_bytes, snapshot_drop);
 }
 
+/* ---------------- fast sample ring ---------------- */
+
+/*
+ * The four tile figures on the cheap clock.
+ *
+ * Everything the roster needs is skipped: no ARP, no iw, no nlbwmon, no nft
+ * beyond the intra counter, no names. What is left is the conntrack walk and
+ * the port counters, which is exactly what the tiles are made of.
+ */
+
+function sample_load(path) {
+	let state = cache_load(path);
+
+	if (type(state?.samples) != 'array')
+		return { samples: [], prev: null };
+
+	return {
+		samples: state.samples,
+		prev: (type(state.prev) == 'object') ? state.prev : null
+	};
+}
+
+/* A counter that went backwards is a reset - interface re-created, rule
+ * rebuilt, every flow of a host expired at once - not negative traffic. */
+function grew(now, before) {
+	return (now > before) ? now - before : 0;
+}
+
+/* Port counters to the four scopes. rx on a member is a client's upload and tx
+ * its download; the uplink's counters face the other way, and what it carried
+ * is subtracted from the local side, because a frame forwarded to the uplink
+ * did not stay inside the LAN.
+ *
+ * The page does the same arithmetic in bridgeRates() for the 10 s path. The
+ * two have to agree, or the tile would jump the moment the ring has a gap. */
+function sample_scopes(ports, before, uplink) {
+	let local = { up: 0, down: 0 }, wan = { up: 0, down: 0 };
+
+	for (let dev, cur in ports) {
+		let was = (before != null) ? before[dev] : null;
+
+		if (type(was) != 'array')
+			continue;
+
+		let rx = grew(int(cur?.rx) ?? 0, int(was[0]) ?? 0);
+		let tx = grew(int(cur?.tx) ?? 0, int(was[1]) ?? 0);
+		let bucket = (dev == uplink) ? wan : local;
+
+		bucket.up += (dev == uplink) ? tx : rx;
+		bucket.down += (dev == uplink) ? rx : tx;
+	}
+
+	return {
+		wanUp: wan.up,
+		wanDown: wan.down,
+		lanUp: (local.up > wan.up) ? local.up - wan.up : 0,
+		lanDown: (local.down > wan.down) ? local.down - wan.down : 0
+	};
+}
+
+/* Conntrack counters to the four scopes, host by host and clamped host by
+ * host: summing first and clamping after would let one host's reset cancel out
+ * the traffic every other host really moved. */
+function sample_conntrack(hosts, before) {
+	let scope = { wanUp: 0, wanDown: 0, lanUp: 0, lanDown: 0 };
+
+	for (let ip, cur in hosts) {
+		let was = (before != null) ? before[ip] : null;
+
+		if (type(was) != 'array')
+			continue;
+
+		scope.lanUp += grew(cur[2], int(was[2]) ?? 0);
+		scope.lanDown += grew(cur[3], int(was[3]) ?? 0);
+		scope.wanUp += grew(cur[4], int(was[4]) ?? 0);
+		scope.wanDown += grew(cur[5], int(was[5]) ?? 0);
+	}
+
+	return scope;
+}
+
+/* The busiest hosts are the ones a rate is drawn from, so they are the ones
+ * kept when the table is larger than the bound. */
+function sample_hosts(hosts) {
+	let names = keys(hosts);
+
+	if (length(names) <= SAMPLE_HOSTS)
+		return hosts;
+
+	let ranked = [];
+
+	for (let ip in names)
+		push(ranked, [ ip, hosts[ip][0] + hosts[ip][1] ]);
+
+	sort(ranked, function(a, b) { return b[1] - a[1]; });
+
+	let kept = {};
+
+	for (let i = 0; i < SAMPLE_HOSTS; i++)
+		kept[ranked[i][0]] = hosts[ranked[i][0]];
+
+	return kept;
+}
+
+function sample_drop(data) {
+	let samples = data.samples;
+
+	if (type(samples) != 'array' || !length(samples))
+		return false;
+
+	/* The oldest point goes first, and a few with it: trimming one per write
+	 * would run the whole fit loop on every tick once the file is over the
+	 * ceiling. */
+	splice(samples, 0, int(length(samples) / 4) + 1);
+
+	return true;
+}
+
+function tick(path, max_bytes) {
+	let state = sample_load(path);
+	let prev = state.prev;
+	let samples = state.samples;
+	let now = time();
+	let dt = now - (int(prev?.ts) ?? 0);
+	let fresh = (dt > 0 && dt <= RATE_MAX_GAP);
+	let lan = lan_state();
+	let devices = device_names(lan.interfaces);
+	let hosts = traffic(all_subnets(lan.interfaces), lan.local);
+	let bridge = port_counters();
+	let intra = intra_read();
+	let counters = {};
+	let ports = {};
+	let deltas;
+	let intra_delta = 0;
+	let intra_bytes = null;
+	let intra_measured = false;
+
+	/* The same merge the 10 s pass makes, so the two agree on what "WAN" is:
+	 * where the offload has zeroed conntrack's byte counters, nlbwmon is the
+	 * only source that still sees the traffic, and a tile reading conntrack
+	 * alone on such a box would sit near zero while the network is busy. */
+	nlbw_into_traffic(hosts, ip_mac_map(arp_entries(devices), snoop_state()));
+
+	for (let ip in hosts) {
+		let one = flat_counters(hosts[ip]);
+
+		counters[ip] = [ one.up, one.down, one.lanUp, one.lanDown, one.wanUp, one.wanDown ];
+	}
+
+	for (let dev, one in bridge.ports)
+		ports[dev] = [ int(one?.rx) ?? 0, int(one?.tx) ?? 0 ];
+
+	if (bridge.mode) {
+		/* The port counters already contain the frames two clients
+		 * exchanged, so the intra counter is neither added here nor
+		 * published: the page would fold it in a second time. */
+		deltas = sample_scopes(bridge.ports, prev?.p, bridge.uplink);
+	}
+	else {
+		deltas = sample_conntrack(counters, prev?.h ?? {});
+
+		if (intra.ok) {
+			intra_bytes = int(intra.bytes) ?? 0;
+			intra_measured = true;
+
+			let was = (prev?.i != null) ? int(prev.i) : null;
+
+			/* A rebuilt rule restarts at zero: the counter is still valid,
+			 * the traffic behind it is not measurable this tick. */
+			intra_delta = (was != null && intra_bytes >= was) ? intra_bytes - was : 0;
+		}
+	}
+
+	/*
+	 * The window is a moving average, not the last tick on its own.
+	 *
+	 * These counters move in bursts - measured on target, an idle-looking
+	 * network still accumulates 80 KB one second and nothing the next, because
+	 * the accounting is reconciled in batches. A tick that lands in a gap
+	 * reports zero, and with a two second cadence that turns the tile into a
+	 * comb: 60 KB/s, 0, 60 KB/s, 0. Averaging the last few ticks hides the
+	 * batch boundaries without inventing traffic: whatever went into the sum
+	 * also came out of a counter.
+	 *
+	 * The window keeps itself around SAMPLE_SPAN seconds, so it works at any
+	 * tick interval instead of assuming the configured one.
+	 */
+	let recent = (fresh && type(prev?.recent) == 'array') ? prev.recent : [];
+	let scope = { wanUp: 0, wanDown: 0, lanUp: 0, lanDown: 0 };
+	let intra_rate = -1;
+	let span = 0;
+	let sums = [ 0, 0, 0, 0, 0 ];
+
+	if (fresh)
+		push(recent, [ deltas.wanUp, deltas.wanDown, deltas.lanUp, deltas.lanDown,
+			intra_delta, dt ]);
+
+	for (let entry in recent)
+		span += int(entry[5]) ?? 0;
+
+	while (length(recent) > 1 && span > SAMPLE_SPAN) {
+		span -= int(recent[0][5]) ?? 0;
+		splice(recent, 0, 1);
+	}
+
+	for (let entry in recent)
+		for (let i = 0; i < 5; i++)
+			sums[i] += int(entry[i]) ?? 0;
+
+	if (span > 0) {
+		scope.wanUp = int((sums[0] / span) + 0.5);
+		scope.wanDown = int((sums[1] / span) + 0.5);
+		scope.lanUp = int((sums[2] / span) + 0.5);
+		scope.lanDown = int((sums[3] / span) + 0.5);
+
+		/* -1 stays "this box has no such counter", which the page reads as
+		 * "leave LAN as measured" rather than as a zero. A bridge that
+		 * happens to have the rule installed keeps -1 too: its port counters
+		 * already contain those frames. */
+		if (intra_measured)
+			intra_rate = int((sums[4] / span) + 0.5);
+	}
+
+	/* One row per tick: when it was measured, the four rates, the intra rate
+	 * (-1 where no such counter exists), and the window they were divided by.
+	 * A zero window marks a tick with no baseline, which the page uses to
+	 * break the line instead of drawing a drop to zero. */
+	push(samples, [ now, scope.wanUp, scope.wanDown, scope.lanUp, scope.lanDown,
+		intra_rate, span ]);
+
+	if (length(samples) > SAMPLE_POINTS)
+		samples = slice(samples, length(samples) - SAMPLE_POINTS);
+
+	let written = write_capped(path, {
+		ts: now,
+		window: span,
+		bridge: bridge.mode,
+		samples: samples,
+		/* What the next tick differences against, and the deltas not yet aged
+		 * out of the moving window. Same file because it is the same writer
+		 * and the same clock; the page ignores it. */
+		prev: {
+			ts: now,
+			h: sample_hosts(counters),
+			p: ports,
+			i: intra_bytes,
+			recent: recent
+		}
+	}, max_bytes, sample_drop);
+
+	return {
+		ok: written != null,
+		path: path,
+		bytes: written?.bytes ?? 0,
+		samples: length(samples),
+		window: span,
+		bridge: bridge.mode,
+		scope: scope,
+		trimmed: written?.trimmed ?? false
+	};
+}
+
 /* ---------------- history ---------------- */
 
 function history_empty() {
@@ -2745,7 +3064,7 @@ if (length(ARGV)) {
 		let max_bytes = number_arg(ARGV[3], DEFAULT_MAX_BYTES);
 
 		result = history_status(path);
-		result.cache = file_report([ path, cache, SNOOP_FILE, PTR_CACHE, DNS_FILE ], max_bytes);
+		result.cache = file_report([ path, cache, DEFAULT_SAMPLES, SNOOP_FILE, PTR_CACHE, DNS_FILE ], max_bytes);
 
 		/* Reported from the snapshot instead of asking nft again: the figure
 		 * the page shows is the one in that file, and status is meant to be a
@@ -2757,8 +3076,11 @@ if (length(ARGV)) {
 		result = intra_setup();
 	else if (cmd == 'intra')
 		result = intra_read();
+	else if (cmd == 'tick')
+		result = tick((ARGV[1] != null && length(ARGV[1])) ? ARGV[1] : DEFAULT_SAMPLES,
+			number_arg(ARGV[2], DEFAULT_MAX_BYTES));
 	else
-		result = { ok: false, error: 'usage: clients-probe [collect|read|clear|status|nlbw|intra|intra-setup] [path|period] [retention_days] [every] [snapshot] [max_bytes]' };
+		result = { ok: false, error: 'usage: clients-probe [collect|read|clear|status|nlbw|intra|intra-setup|tick] [path|period] [retention_days] [every] [snapshot] [max_bytes]' };
 
 	print(sprintf('%J\n', result));
 	exit((result.ok == false) ? 1 : 0);
