@@ -123,11 +123,10 @@ airoha_npu_version() {
 }
 
 airoha_bridge_offload_supported() {
-	case "$(airoha_board_compat)" in
-		gemtek,xg2010g|gemtek,xg2010g-ubi|gemtek,xg2010g-recovery|\
-		gemtek,xg2010g-2g|gemtek,xg2010g-2g-ubi|gemtek,xg2010g-2g-recovery) return 1 ;;
-		*) return 0 ;;
-	esac
+	# 原实现把 gemtek,xg2010g 系列整组排除（无文档化的硬件原因，仅为保守）。
+	# PON 设备（含 xg2010g）线路本身承载 tagged 业务 VLAN（IPTV/语音/多业务），
+	# 统一开放桥卸载开关；是否启用仍由用户在 NPU 页手动决定，默认保持关闭。
+	return 0
 }
 
 airoha_ppe_parse() {
@@ -680,7 +679,7 @@ _airoha_topology_cache_valid() {
 # Include split GDM/NBQ children as separate netdevs, never shared MIB samples.
 # Only structure is cached; all link/MIB values and the whole PON block are read
 # live so registration and traffic changes remain visible between polls.
-airoha_port_topology_json() {
+_airoha_port_topology_json_live() {
 	local cache="/tmp/airoha-topology.struct"
 	local model="" compatible="" wan_netdev="" lan_count=0 wan_count=0 has_pon=0
 	local record f1 f2 f3 f4 f5 f6 f7 f8 extra entry
@@ -742,6 +741,70 @@ airoha_port_topology_json() {
 	printf '{"model":"%s","compatible":"%s","lan_netdevs":%s,"wan_netdev":"%s","lan_count":%d,"wan_count":%d,"has_pon":%d,"ports":[%s],"pon":%s}' \
 		"$(_airoha_json_str "$model")" "$(_airoha_json_str "$compatible")" "$lan_json" "$(_airoha_json_str "$wan_netdev")" \
 		"$lan_count" "$wan_count" "$has_pon" "$ports" "$pon_json"
+}
+
+# Whole-JSON cache in front of the builder.
+#
+# The structure cache above keeps the rebuild cheap, but every call still walks
+# it and re-reads per-port link state, operstate and the whole PON block: 0.50 s
+# of shell on the AN7581, the second most expensive probe on the status page
+# after the PPE table. Port link state changes when a cable moves, not per poll,
+# so the resulting object is cached as well and the two tiers do different jobs:
+# the structure cache makes a rebuild cheap, this one makes rebuilds rare.
+#
+# 15 s against a 10 s page poll: one round is served from cache, the next
+# rebuilds, i.e. one rebuild per 20 s, and a replug is visible within a poll plus
+# the TTL. A degraded answer (no ports) is published but never cached - that
+# state is exactly what a transient sysfs failure produces, and caching it would
+# keep the page empty for a full TTL after it clears.
+airoha_topology_json_cache=/tmp/airoha-topology.json
+airoha_topology_json_ttl=15
+
+airoha_port_topology_json() {
+	local cache="$airoha_topology_json_cache"
+	local now="" ts="" json="" tmp=""
+
+	now=$(date +%s 2>/dev/null)
+	case "$now" in ''|*[!0-9]*) now="" ;; esac
+	if [ -n "$now" ] && [ -s "$cache" ]; then
+		IFS= read -r ts < "$cache" 2>/dev/null
+		case "$ts" in ''|*[!0-9]*) ts="" ;; esac
+		# Same rules as the other caches here: a stamp from the future is clock
+		# skew, not freshness, and a negative age must never look like a hit.
+		if [ -n "$ts" ] && [ "$now" -ge "$ts" ] &&
+		   [ $((now - ts)) -lt "$airoha_topology_json_ttl" ]; then
+			json=$(sed -n '2,$p' "$cache" 2>/dev/null)
+			case "$json" in
+				'{'*'}')
+					printf '%s' "$json"
+					return
+					;;
+			esac
+		fi
+	fi
+
+	json=$(_airoha_port_topology_json_live)
+
+	# Only cache a well-formed answer that actually describes ports: an empty
+	# answer (the builder's own cache could not be built) and the degraded
+	# object with an empty port list both mean "try again next round".
+	case "$json" in
+		'{'*'}') ;;
+		*) printf '%s' "$json"; return ;;
+	esac
+	case "$json" in
+		*'"ports":[]'*) printf '%s' "$json"; return ;;
+	esac
+	[ -n "$now" ] || { printf '%s' "$json"; return; }
+
+	tmp=$(mktemp "$cache.XXXXXX" 2>/dev/null)
+	if [ -n "$tmp" ]; then
+		{
+			printf '%s\n' "$now"
+			printf '%s\n' "$json"
+		} > "$tmp" 2>/dev/null && mv -f "$tmp" "$cache" 2>/dev/null || rm -f "$tmp"
+	fi
+	printf '%s' "$json"
 }
 # <<< airoha-topo-helpers <<<
 

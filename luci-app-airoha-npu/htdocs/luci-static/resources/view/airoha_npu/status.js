@@ -310,7 +310,7 @@ function renderFreqCard(st) {
  * instead of once per tab.
  *
  * HIST_WINDOW mirrors HIST_MAX in the backend, including its cadence: one
- * point per two poll rounds, i.e. 120 x 10 s = 20 minutes. The charts use it
+ * point per poll, i.e. 120 x 10 s = 20 minutes. The charts use it
  * as the fixed x window, so a buffer that is only partly filled grows in from
  * the right edge and the newest sample always lands on the right border.
  *
@@ -322,9 +322,9 @@ var HIST_WINDOW = 120;
  * browser throttled the poll, or the board rebooted. The plot is broken there
  * rather than bridging time that was never measured.
  *
- * Four samples, not two: the backend writes one point per two 5 s polls (10 s),
- * so a single missed round produces a 20 s spacing and must still be joined -
- * only a real absence (>= 40 s) is worth a break. */
+ * Four samples, not two: the backend writes one point per poll (10 s), so a
+ * single missed round produces a 20 s spacing and must still be joined - only a
+ * real absence (>= 40 s) is worth a break. */
 var HIST_GAP_MS = 40000;
 
 var freqHistory = [];   /* [ { t: ms, v: kHz } ], oldest first */
@@ -370,10 +370,13 @@ function parseLoadHistory(raw) {
 		var u = [];
 		for (var c = 0; c < s[1].length; c++) {
 			var v = histNum(s[1][c]);
-			/* null marks a core that was not measurable in that interval
-			 * (hotplug, or a counter that went backwards): the line breaks
-			 * there instead of being drawn through a fake 0. */
-			u.push(v === null ? null : Math.min(100, Math.max(0, v)));
+			/* Values arrive in tenths of a percent: rpcd parses the backend's
+			 * reply and re-serialises it, and an integer survives that trip
+			 * verbatim while 4.3 comes back as 4.2999999999999998. null marks
+			 * a core that was not measurable in that interval (hotplug, or a
+			 * counter that went backwards): the line breaks there instead of
+			 * being drawn through a fake 0. */
+			u.push(v === null ? null : Math.min(100, Math.max(0, v / 10)));
 		}
 		if (!u.length) continue;
 		out.push({ t: t * 1000, u: u });
@@ -1021,10 +1024,10 @@ function renderOffloadSwitch(cfg) {
 }
 
 function renderOffloadControls(topo, vo, flo, apo, blocked) {
-	var id = String(topo && topo.compatible || '');
-	if (!id) return null;
-	var bridge = !/^gemtek,xg2010g(?:-|$)/.test(id) &&
-		vo.supported !== false && apo.supported !== false;
+	// 单一事实来源：是否显示桥卸载开关完全由后端 airoha_bridge_offload_supported
+	// 决定（vo.supported / apo.supported），不再按 compatible 字符串硬编码排除。
+	var bridge = vo.supported !== false && apo.supported !== false;
+	if (!bridge) return null;
 	var controls = [
 		renderOffloadSwitch({ rowId: 'flow-offload-row', inputId: 'flow-offload-select', badgeId: 'flow-offload-badge',
 			name: _('Flow Offload'), enabled: flo.enabled, blocked: false, callFn: callSetFlowOffload })
@@ -1729,7 +1732,7 @@ return view.extend({
 		var latestPpeRequest = 0;
 		// Last per-engine PPE slice seen in a real (non-deferred) PPE round. The
 		// CDM cards and the PPE engine card show it, but the PPE probe is on a
-		// 20 s cadence while the rest of the page re-renders every 5 s, so it has
+		// 20 s cadence while the rest of the page re-renders every 10 s, so it has
 		// to outlive a single reply. zero_l2 rides on the same parse, and on a
 		// backend that predates the split it is the only one of the two present.
 		var latestPpeSplit = (typeof ppe.ppe1 !== 'undefined' || typeof ppe.zero_l2 !== 'undefined') ? ppe : null;
@@ -1745,7 +1748,7 @@ return view.extend({
 				updatedEl.textContent = _('Updated %s').format(new Date().toLocaleTimeString());
 		}
 
-		// The page auto-polls every 5 s; the only "refresh" affordance is the
+		// The page auto-polls every 10 s; the only "refresh" affordance is the
 		// system-level updated-time stamp on the right. Manual Refresh /
 		// Pause-Resume buttons were removed — they conflicted with it.
 		updatedEl = E('span', { 'class': 'ai-updated' }, '');
@@ -1793,8 +1796,8 @@ return view.extend({
 					E('div', { 'id': 'offload-controls', 'style': 'margin-top:var(--ds-sp-3)' },
 						renderOffloadControls(topo, vo, flo, apo, bridgeBlocked)),
 					/* PPE Engines, NPU and EIP93 crypto share one three-column
-					 * grid. The two slots keep their own ids so the 5 s poll and
-					 * the 20 s crypto fetch can refresh their cards without
+					 * grid. The two slots keep their own ids so the 10 s poll and
+					 * the 60 s crypto fetch can refresh their cards without
 					 * touching the neighbours; display:contents keeps the cards
 					 * themselves as the grid items. */
 					E('div', { 'class': 'ai-grid ai-grid--3', 'style': 'margin-top:var(--ds-sp-2)' }, [
@@ -1980,8 +1983,10 @@ return view.extend({
 		}
 
 		// NSS Crypto is not part of the dashboard: its only expensive probe is
-		// the OpenSSL engine test (server-side cached for a minute), so it is
-		// pulled on first paint and then once per PPE cycle, about every 20 s.
+		// the OpenSSL engine test, ~0.46 s per call, and the engine list cannot
+		// change before a reboot. Pulled on first paint and then once a minute -
+		// the card is a capability report, not a counter, so a minute of latency
+		// costs nothing and the call is 1/6 of the rounds instead of 1/4.
 		function applyCrypto(cr) {
 			var el = document.getElementById('crypto-status');
 			if (el && cr) el.replaceChildren(renderCryptoStatus(cr));
@@ -1991,16 +1996,22 @@ return view.extend({
 			return _safeCall(callCryptoInfo(), null).then(applyCrypto);
 		}
 
-		// Poll cadence: the flow table does not need 5 s resolution, and it is
-		// the single most expensive probe on the board. Every 4th cycle (i.e.
-		// about every 20 s) asks for PPE; the three cycles in between skip it,
-		// which is what makes the periodic poll cheap.
-		var PPE_POLL_EVERY = 4;
+		// Poll cadence. 10 s is the master interval: everything the page measures
+		// is a trend, and one round costs ~1.8 s of CPU across the four cores, so
+		// halving the rate halves that. The two probes that cannot afford the
+		// same rate get their own counters, expressed in polls so the numbers
+		// stay readable against POLL_SECS:
+		//   * PPE (a 1024-entry debugfs snapshot + awk, the most expensive probe
+		//     on the board) every 2nd poll = 20 s;
+		//   * crypto every 6th poll = 60 s.
+		var POLL_SECS = 10;
+		var PPE_POLL_EVERY = 2;
+		var CRYPTO_POLL_EVERY = 6;
 		var pollCount = 0;
 
 		function pollFetch() {
 			pollCount++;
-			if (pollCount % PPE_POLL_EVERY === 0) runCrypto();
+			if (pollCount % CRYPTO_POLL_EVERY === 0) runCrypto();
 			return runFetch(pollCount % PPE_POLL_EVERY === 1);
 		}
 
@@ -2012,8 +2023,10 @@ return view.extend({
 		runFetch(false).then(function() {
 			return runFetch(true);
 		});
-		// Poll for periodic updates
-		poll.add(pollFetch, 5);
+		// Poll for periodic updates. POLL_SECS is mirrored by the backend's
+		// history gate (HIST_GATE in luci.airoha_npu, 8 s): every round now
+		// passes it, so the curves get one point per poll.
+		poll.add(pollFetch, POLL_SECS);
 
 		return view;
 	},

@@ -43,6 +43,10 @@ _has_active_wan() {
 }
 
 _bridge_offload_blocked() {
+	# PON 设备线路承载 tagged 业务 VLAN（IPTV/语音/多业务），即便 pon0 作为
+	# WAN 已激活，也允许开启桥卸载以加速/匹配这些 VLAN 流量。普通以太网路由
+	# 仍保持原限制：路由模式下用硬件流量加速，不开桥 netfilter。
+	[ "$(airoha_pon_present)" = "1" ] && return 1
 	_has_active_wan
 }
 
@@ -51,10 +55,16 @@ _bridge_offload_block_error() {
 }
 
 get_device_mode() {
-	local dhcp_ignore
+	local dhcp_ignore blocked
 
 	if _has_active_wan; then
-		printf '{"mode":"router","reason":"active_wan","bridge_offload_blocked":true}'
+		# PON 设备即使 WAN 激活也允许桥卸载；普通以太网路由保持受限。
+		if [ "$(airoha_pon_present)" = "1" ]; then
+			blocked=false
+		else
+			blocked=true
+		fi
+		printf '{"mode":"router","reason":"active_wan","bridge_offload_blocked":%s}' "$blocked"
 		return
 	fi
 
@@ -183,10 +193,18 @@ _hist_append() {
 }
 
 # Fold the current frequency and one /proc/stat snapshot into the ring files.
-# Prints "<now> <freq_lines> <load_lines>" and then the lines that still have to
-# be appended ("F ..." / "L ..."). The append itself is left to the caller:
-# awk's `print > file` truncates on first use inside one program run, so it can
-# write the new baseline but cannot append a sample.
+# Prints "<now> <freq_lines> <load_lines> <old_format>" and then the lines that
+# still have to be appended ("F ..." / "L ..."). The append itself is left to the
+# caller: awk's `print > file` truncates on first use inside one program run, so
+# it can write the new baseline but cannot append a sample.
+#
+# A load sample is one integer per core in TENTHS of a percent (43 = 4.3 %), not
+# a decimal: rpcd parses the reply and re-serialises it, which turns 4.3 into
+# 4.2999999999999998 - twenty characters per core per sample on the wire, for a
+# value the chart cannot show anyway. Integers survive that round trip verbatim.
+# <old_format> is 1 when the file still holds the pre-integer format (a decimal
+# point anywhere in a sample): the caller then drops the file instead of
+# publishing 120 nulls for the next twenty minutes.
 #   $1 frequency in kHz (0 = unknown), $2 clock as seconds since the epoch
 _cpu_hist_sample() {
 	local freq="$1" now="$2" out line nf nl
@@ -194,7 +212,7 @@ _cpu_hist_sample() {
 	out=$(awk -v now="$now" -v freq="$freq" -v gate="$HIST_GATE" \
 		-v freqf="$HIST_FREQ" -v loadf="$HIST_LOAD" -v basef="$HIST_BASE" '
 		BEGIN {
-			nf = 0; nl = 0; lf = 0; ll = 0; bts = 0; nbc = 0
+			nf = 0; nl = 0; lf = 0; ll = 0; bts = 0; nbc = 0; oldfmt = 0
 			# Both files are read here anyway to place the gate, so counting
 			# their lines costs no extra pass and saves a `wc` fork.
 			while ((getline l < freqf) > 0) {
@@ -205,6 +223,7 @@ _cpu_hist_sample() {
 			while ((getline l < loadf) > 0) {
 				split(l, a, " ")
 				if (a[1] ~ /^[0-9]+$/) { nl++; ll = a[1] + 0 }
+				if (l ~ /[0-9]\.[0-9]/) oldfmt = 1
 			}
 			close(loadf)
 			# Previous reference, "<ts> <total> <idle> <total> <idle> ...".
@@ -232,7 +251,7 @@ _cpu_hist_sample() {
 			ci[nc] = $5 + $6
 		}
 		END {
-			printf "%d %d %d\n", now, nf, nl
+			printf "%d %d %d %d\n", now, nf, nl, oldfmt
 			if (nc < 1) exit
 
 			# The reference advances on every round that got the lock, even
@@ -266,7 +285,7 @@ _cpu_hist_sample() {
 					# start a new run instead of drawing a value that never was.
 					if (dt < 0) { measured = 0; break }
 					if (dt > 0 && di >= 0 && di <= dt) {
-						out = out sprintf(" %.1f", (1 - di / dt) * 100)
+						out = out sprintf(" %d", int((1 - di / dt) * 1000 + 0.5))
 						measured = 1
 					} else {
 						out = out " -"
@@ -286,6 +305,10 @@ _cpu_hist_sample() {
 			*)
 				set -- $line
 				nf="${2:-0}"; nl="${3:-0}"
+				# A file written by the pre-integer format cannot be read as
+				# tenths, and mixing the two would draw a curve ten times too
+				# high. Drop it once; the next rounds rebuild it.
+				[ "${4:-0}" = 1 ] && : > "$HIST_LOAD"
 				;;
 		esac
 	done <<EOF
@@ -316,9 +339,11 @@ _cpu_hist_json() {
 				if (a[1] !~ /^[0-9]+$/ || length(a) < 2) continue
 				t = a[1] + 0
 				if (now > 0 && (t < now - ttl || t > now + 60)) continue
+				# Tenths of a percent, always an integer - see the format note
+				# on _cpu_hist_sample. Anything else is a torn line.
 				s = ""
 				for (i = 2; i <= length(a); i++) {
-					if (a[i] ~ /^[0-9]+(\.[0-9])?$/)
+					if (a[i] ~ /^[0-9]+$/)
 						s = s (i > 2 ? "," : "") (a[i] + 0)
 					else
 						s = s (i > 2 ? "," : "") "null"
@@ -918,7 +943,7 @@ _cdm_json() {
 		"$cpu0d" "$cpu1d" "$cpu2d" "$cpu3d"
 }
 
-get_frame_engine() {
+_get_frame_engine_live() {
 	local psb pk pse_used pse_free pse_peak gdm cdm entry reg base spec
 
 	if ! command -v devmem >/dev/null 2>&1; then
@@ -983,6 +1008,58 @@ get_frame_engine() {
 
 	printf '{"available":true,"pse":{"used":%s,"free":%s,"peak":%s},"gdm":[%s],"cdm":[%s]}' \
 		"$pse_used" "$pse_free" "$pse_peak" "$gdm" "$cdm"
+}
+
+# Frame engine snapshot behind a 20 s TTL.
+#
+# The devmem reads are the whole cost of this probe (~0.34 s for three PSE
+# registers plus a GDM and a CDM block), and what they publish - PSE shared
+# buffer occupancy with its latched high-water mark, GDM/CDM MIBs - is meant to
+# be read as a trend, not as a per-second counter. Caching the finished object
+# for 20 s turns the cost into one round in every two at the page's 10 s poll,
+# and because the dashboard keeps carrying the field, the view needs no change:
+# it simply redraws the same numbers in between.
+#
+# Only a successful read is cached. `available:false` is either permanent
+# (devmem not installed) or transient (a register read failed); caching the
+# transient one would leave the card blank for a full TTL after it recovers.
+get_frame_engine() {
+	local cache="/tmp/luci-airoha-npu.frame.cache"
+	local ttl=20 now="" ts="" json="" tmp=""
+
+	now=$(date +%s 2>/dev/null)
+	case "$now" in ''|*[!0-9]*) now="" ;; esac
+	if [ -n "$now" ] && [ -s "$cache" ]; then
+		IFS= read -r ts < "$cache" 2>/dev/null
+		case "$ts" in ''|*[!0-9]*) ts="" ;; esac
+		if [ -n "$ts" ] && [ "$now" -ge "$ts" ] &&
+		   [ $((now - ts)) -lt "$ttl" ]; then
+			json=$(sed -n '2,$p' "$cache" 2>/dev/null)
+			case "$json" in
+				'{'*'"available":true'*'}')
+					printf '%s' "$json"
+					return
+					;;
+			esac
+		fi
+	fi
+
+	json=$(_get_frame_engine_live)
+
+	case "$json" in
+		'{'*'"available":true'*'}') ;;
+		*) printf '%s' "$json"; return ;;
+	esac
+	[ -n "$now" ] || { printf '%s' "$json"; return; }
+
+	tmp=$(mktemp "$cache.XXXXXX" 2>/dev/null)
+	if [ -n "$tmp" ]; then
+		{
+			printf '%s\n' "$now"
+			printf '%s\n' "$json"
+		} > "$tmp" 2>/dev/null && mv -f "$tmp" "$cache" 2>/dev/null || rm -f "$tmp"
+	fi
+	printf '%s' "$json"
 }
 
 # NSS (EIP93) crypto engine snapshot.
@@ -1326,7 +1403,7 @@ get_vlan_offload() {
 
 set_vlan_offload() {
 	airoha_bridge_offload_supported || {
-		echo '{"error":"VLAN offload is not supported on XG2010G"}'
+		echo '{"error":"VLAN offload is not supported on this device"}'
 		return
 	}
 	local enabled
@@ -1369,7 +1446,7 @@ get_pppoe_offload() {
 
 set_pppoe_offload() {
 	airoha_bridge_offload_supported || {
-		echo '{"error":"Bridge offload is not supported on XG2010G"}'
+		echo '{"error":"Bridge offload is not supported on this device"}'
 		return
 	}
 	local enabled
@@ -1458,7 +1535,7 @@ get_apmode_offload() {
 
 set_apmode_offload() {
 	airoha_bridge_offload_supported || {
-		echo '{"error":"AP mode acceleration is not supported on XG2010G"}'
+		echo '{"error":"AP mode acceleration is not supported on this device"}'
 		return
 	}
 	local enabled
