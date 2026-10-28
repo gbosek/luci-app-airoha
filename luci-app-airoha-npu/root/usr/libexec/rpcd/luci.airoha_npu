@@ -336,8 +336,13 @@ _cpu_hist_json() {
 				if (now > 0 && (t < now - ttl || t > now + 60)) continue
 				s = ""
 				for (i = 2; i <= length(a); i++) {
-					/* Tenths of a percent, always an integer - see the format
-					 * note on _cpu_hist_sample. Anything else is a torn line. */
+					# Tenths of a percent, always an integer - see the format
+					# note on _cpu_hist_sample. Anything else is a torn line.
+					# Awk only understands `#`: a /* */ comment is parsed as a
+					# regex literal (/ * ... * / has nothing to repeat), busybox
+					# awk then aborts before BEGIN runs and this whole program
+					# prints nothing - which silently published empty arrays for
+					# both history curves.
 					if (a[i] ~ /^[0-9]+$/)
 						s = s (i > 2 ? "," : "") (a[i] + 0)
 					else
