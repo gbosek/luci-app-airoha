@@ -276,6 +276,42 @@ let log_path = function() {
 	return DEFAULT_LOG;
 };
 
+// fs.readfile() has no offset argument in this ucode runtime. Use a seekable
+// handle and cap each batch so a backlogged log cannot become one large string.
+function read_log_chunk(path, offset, count) {
+	let handle = fs.open(path, 'r');
+	if (!handle)
+		return '';
+	let data = '';
+	try {
+		handle.seek(offset);
+		data = handle.read(min(count, 65536)) ?? '';
+	}
+	catch (e) {}
+	handle.close();
+	return data;
+}
+
+// The raw log is a RAM-backed transport, not an audit archive. Trim only our
+// default log after its complete contents were committed to the bounded archive.
+// dnsmasq opens this file with O_APPEND; keep the inode so no signal is needed.
+function rotate_consumed_log(path, offset) {
+	if (path != DEFAULT_LOG || offset < 1048576)
+		return false;
+	let before = fs.lstat(path);
+	if (before?.type != 'file' || before.size != offset)
+		return false;
+	let handle = fs.open(path, 'r+');
+	if (!handle)
+		return false;
+	let after = fs.stat('/proc/self/fd/' + handle.fileno());
+	let ok = after?.ino == before.ino && after?.dev?.major == before.dev.major &&
+		after?.dev?.minor == before.dev.minor &&
+		after?.size == offset && handle.truncate(0);
+	handle.close();
+	return ok ? true : false;
+}
+
 /* ---------------- collect ---------------- */
 
 let collect = function() {
@@ -331,7 +367,7 @@ let collect = function() {
 
 	if (size > data.offset) {
 		try {
-			fresh = fs.readfile(path, size - data.offset, data.offset) ?? '';
+			fresh = read_log_chunk(path, data.offset, size - data.offset);
 		}
 		catch (e) {
 			fresh = '';
@@ -455,15 +491,16 @@ let collect = function() {
 	if (added > 0 || consumed > 0)
 		data.updated = now;
 
-	if (added > 0 || consumed > 0)
-		return {
-			ok: write_archive(data),
-			path: ARCHIVE,
-			log: path,
-			added: added,
-			records: length(data.records),
-			offset: data.offset
-		};
+	if (added > 0 || consumed > 0) {
+		let ok = write_archive(data);
+		let rotated = ok && rotate_consumed_log(path, data.offset);
+		if (rotated) {
+			data.offset = 0;
+			ok = write_archive(data);
+		}
+		return { ok: ok, path: ARCHIVE, log: path, added: added,
+			records: length(data.records), offset: data.offset, rotated: rotated };
+	}
 
 	return { ok: true, path: ARCHIVE, log: path, added: 0, records: length(data.records), offset: data.offset };
 };

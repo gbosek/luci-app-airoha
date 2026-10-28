@@ -961,10 +961,13 @@ _get_frame_engine_live() {
 	# [30:16] SHARE_USED_CNT_MAX, [14:0] FQ_CNT_MIN. The shared pool only absorbs
 	# bursts that overrun the per-port reservations, so the instantaneous word at
 	# 0x104 is back to zero within milliseconds; the latched max is what a poll
-	# every few seconds can actually observe. A failed read degrades to 0 rather
-	# than dropping the whole card.
-	pk=$(_devmem32 0x1fb50100) || pk=0
-	pse_peak=$(( (pk >> 16) & 0x7FFF ))
+	# every few seconds can actually observe. Failed reads remain unknown;
+	# measured zero and the other valid counters remain distinguishable.
+	if pk=$(_devmem32 0x1fb50100); then
+		pse_peak=$(( (pk >> 16) & 0x7FFF ))
+	else
+		pse_peak=null
+	fi
 
 	# Per-port queue occupancy (FE+0x150+4i) is deliberately not exported: every
 	# idle port reports a constant IQ of 2, which reads as a permanent backlog

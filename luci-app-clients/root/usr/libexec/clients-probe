@@ -845,52 +845,80 @@ function wifi_state() {
  * picking tokens out costs 299 ms, so walking to the three keys we need is
  * still the cheaper of the two, just not for the reason the old comment gave.
  */
-function token_at(line, from) {
-	let end = index(line, ' ', from);
-
-	return (end < 0) ? substr(line, from) : substr(line, from, end - from);
+// ucode index() accepts only two arguments, unlike JS indexOf().
+// Search a suffix explicitly or the parser keeps appending the first tuple.
+function find_from(text, needle, start) {
+	let at = index(substr(text, start), needle);
+	return at < 0 ? -1 : start + at;
 }
 
 function split_tuple(line) {
 	let family;
-	let head = substr(line, 0, 4);
 
-	if (head == 'ipv4')
+	if (substr(line, 0, 4) == 'ipv4')
 		family = 4;
-	else if (head == 'ipv6')
+	else if (substr(line, 0, 4) == 'ipv6')
 		family = 6;
 	else
 		return null;
 
+	let len = length(line);
 	let tuples = [], pos = 0;
 
-	while (true) {
-		let src_at = index(line, 'src=', pos);
+	while (pos < len && length(tuples) < 2) {
+		let src_at = find_from(line, 'src=', pos);
 
 		if (src_at < 0)
 			break;
 
-		let src = token_at(line, src_at + 4);
-		let dst = null, bytes = 0, end = src_at + 4;
+		let next_src = find_from(line, 'src=', src_at + 4);
+		let limit = next_src < 0 ? len : next_src;
+		let start = src_at + 4;
+		let end = start;
 
-		let dst_at = index(line, 'dst=', end);
+		let space = find_from(line, ' ', start);
+		let tab = find_from(line, '	', start);
+		end = limit;
+		if (space >= start && space < end) end = space;
+		if (tab >= start && tab < end) end = tab;
 
-		if (dst_at >= 0) {
-			dst = token_at(line, dst_at + 4);
-			end = dst_at + 4;
+		let src = substr(line, start, end - start);
+		let dst = null, bytes = 0;
+
+		let dst_at = find_from(line, 'dst=', end);
+
+		if (dst_at >= 0 && dst_at < limit) {
+			start = dst_at + 4;
+			end = start;
+
+			let space = find_from(line, ' ', start);
+			let tab = find_from(line, '	', start);
+			end = limit;
+			if (space >= start && space < end) end = space;
+			if (tab >= start && tab < end) end = tab;
+
+			dst = substr(line, start, end - start);
 		}
 
-		let bytes_at = index(line, 'bytes=', end);
+		let bytes_at = find_from(line, 'bytes=', end);
 
-		if (bytes_at >= 0) {
-			bytes = int(token_at(line, bytes_at + 6)) ?? 0;
-			end = bytes_at + 6;
+		if (bytes_at >= 0 && bytes_at < limit) {
+			start = bytes_at + 6;
+			end = start;
+
+			let space = find_from(line, ' ', start);
+			let tab = find_from(line, '	', start);
+			end = limit;
+			if (space >= start && space < end) end = space;
+			if (tab >= start && tab < end) end = tab;
+
+			bytes = int(substr(line, start, end - start)) ?? 0;
 		}
 
 		push(tuples, { src: src, dst: dst, bytes: bytes });
 
-		/* Skip past this tuple's own counters so the next src= is the reply. */
-		pos = end;
+		/* Monotonic progress, even when accounting or a tuple is incomplete. */
+		pos = limit;
 	}
 
 	return { family: family, tuples: tuples };
@@ -1209,15 +1237,50 @@ function port_counters() {
  * come from one consistent read or the subtraction is between two different
  * moments.
  */
-function wan_device(bridge) {
+/* Netifd describes logical L3 interfaces. Count each active WAN device once,
+ * including IPv6 aliases, and never add its physical PPPoE parent again.
+ * The long-lived 1 s loop caches discovery for 30 s; byte counters stay live. */
+let wan_cache = null, wan_cache_at = 0;
+
+function wan_devices(bridge) {
 	if (bridge?.uplink != null)
-		return bridge.uplink;
+		return [ bridge.uplink ];
 
-	for (let dev in WAN_CANDIDATES)
-		if (counter(dev, 'rx_bytes') != null)
-			return dev;
+	let now = time();
+	if (wan_cache != null && now >= wan_cache_at && now - wan_cache_at < 30)
+		return wan_cache;
 
-	return null;
+	let devices = [], bus = connect(), dump = null;
+	if (bus) {
+		try { dump = bus.call('network.interface', 'dump'); }
+		catch (e) {}
+		bus.disconnect();
+	}
+	for (let iface in (dump?.interface ?? [])) {
+		let name = iface.interface ?? '';
+		let dev = iface.l3_device || iface.device;
+		if (!iface.up || name == 'loopback' || match(name, /^lan[0-9]*$/) ||
+		    !match(dev ?? '', /^[a-zA-Z0-9_.:@-]+$/) || index(bridge?.members ?? [], dev) >= 0)
+			continue;
+		let default_route = false;
+		for (let route in (iface.route ?? []))
+			if ((route.target == '0.0.0.0' || route.target == '::') && int(route.mask) == 0)
+				default_route = true;
+		if (default_route && index(devices, dev) < 0 && counter(dev, 'rx_bytes') != null)
+			push(devices, dev);
+	}
+	// If netifd is temporarily unavailable, retain the existing discovery style,
+	// but include both PPPoE WANs rather than silently taking only the first.
+	if (!length(devices) && type(dump?.interface) != 'array') {
+		for (let dev in [ 'pppoe-wan', 'pppoe-wanb' ])
+			if (counter(dev, 'rx_bytes') != null)
+				push(devices, dev);
+		if (!length(devices))
+			for (let dev in WAN_CANDIDATES)
+				if (counter(dev, 'rx_bytes') != null) { push(devices, dev); break; }
+	}
+	wan_cache = devices; wan_cache_at = now;
+	return devices;
 }
 
 /* ---------------- nlbwmon long-term counters ---------------- */
@@ -1863,14 +1926,15 @@ function snapshot(withPtr) {
 	let names = host_names(leases);
 	let snoop = snoop_state();
 	let bridge = port_counters();
-	let wan = wan_device(bridge);
+	let wans = wan_devices(bridge);
+	let wan = wans[0] ?? null;
 
 	/* The uplink belongs in the port table even when it is not a bridge
 	 * member. The LAN figure is the member sum minus what crossed it, so both
 	 * ends of the subtraction have to be read at the same moment and carried
 	 * in the same object - otherwise the page and the sampler end up
 	 * differencing numbers taken seconds apart. */
-	if (wan != null && bridge.ports[wan] == null) {
+	for (let wan in wans) if (bridge.ports[wan] == null) {
 		let rx = counter(wan, 'rx_bytes');
 		let tx = counter(wan, 'tx_bytes');
 
@@ -1979,6 +2043,7 @@ function snapshot(withPtr) {
 			/* The device the LAN figure is measured against - a bridge member
 			 * on an AP, pppoe-wan or wan on a router. */
 			wan: wan,
+			wans: wans,
 			lan: bridge.name,
 			members: bridge.members,
 			ports: bridge.ports
@@ -2304,7 +2369,7 @@ function trend_append(data, prev) {
 	 *
 	 * Per-client rates stay on conntrack: it is the only thing that knows
 	 * which address moved the bytes. */
-	let wan = data.bridge?.wan ?? data.bridge?.uplink;
+	let wans = data.bridge?.wans ?? [ data.bridge?.wan ?? data.bridge?.uplink ];
 	let portRates = data.bridge?.rates;
 	let l2 = null;
 
@@ -2313,12 +2378,12 @@ function trend_append(data, prev) {
 		let wide = { up: 0, down: 0 };
 
 		for (let dev, r in portRates) {
-			let bucket = (dev == wan) ? wide : local;
+			let bucket = (index(wans, dev) >= 0) ? wide : local;
 
 			/* rx on a member is a client's upload, tx its download; the
 			 * uplink's counters face the other way. */
-			bucket.up += (dev == wan) ? (r.tx ?? 0) : (r.rx ?? 0);
-			bucket.down += (dev == wan) ? (r.rx ?? 0) : (r.tx ?? 0);
+			bucket.up += (index(wans, dev) >= 0) ? (r.tx ?? 0) : (r.rx ?? 0);
+			bucket.down += (index(wans, dev) >= 0) ? (r.rx ?? 0) : (r.tx ?? 0);
 		}
 
 		l2 = {
@@ -2583,6 +2648,7 @@ function grew(now, before) {
  * The page does the same arithmetic in bridgeRates() for the 10 s path. The
  * two have to agree, or the tile would jump the moment the ring has a gap. */
 function sample_scopes(ports, before, uplink) {
+	let uplinks = type(uplink) == 'array' ? uplink : [ uplink ];
 	let local = { up: 0, down: 0 }, wan = { up: 0, down: 0 };
 
 	for (let dev, cur in ports) {
@@ -2593,10 +2659,10 @@ function sample_scopes(ports, before, uplink) {
 
 		let rx = grew(int(cur?.rx) ?? 0, int(was[0]) ?? 0);
 		let tx = grew(int(cur?.tx) ?? 0, int(was[1]) ?? 0);
-		let bucket = (dev == uplink) ? wan : local;
+		let bucket = (index(uplinks, dev) >= 0) ? wan : local;
 
-		bucket.up += (dev == uplink) ? tx : rx;
-		bucket.down += (dev == uplink) ? rx : tx;
+		bucket.up += (index(uplinks, dev) >= 0) ? tx : rx;
+		bucket.down += (index(uplinks, dev) >= 0) ? rx : tx;
 	}
 
 	return {
@@ -2693,7 +2759,7 @@ function tick(path, max_bytes, with_macs) {
 	let dt = now - (int(prev?.ts) ?? 0);
 	let fresh = (dt > 0 && dt <= RATE_MAX_GAP);
 	let bridge = port_counters();
-	let uplink = wan_device(bridge);
+	let uplinks = wan_devices(bridge);
 	let cur = {};
 	let ports = {};
 	let deltas;
@@ -2716,7 +2782,7 @@ function tick(path, max_bytes, with_macs) {
 	for (let dev, one in bridge.ports)
 		cur[dev] = { rx: int(one?.rx) ?? 0, tx: int(one?.tx) ?? 0 };
 
-	if (uplink != null && cur[uplink] == null) {
+	for (let uplink in uplinks) if (cur[uplink] == null) {
 		let rx = counter(uplink, 'rx_bytes');
 		let tx = counter(uplink, 'tx_bytes');
 
@@ -2727,7 +2793,7 @@ function tick(path, max_bytes, with_macs) {
 	for (let dev, one in cur)
 		ports[dev] = [ one.rx, one.tx ];
 
-	deltas = sample_scopes(cur, prev?.p, uplink);
+	deltas = sample_scopes(cur, prev?.p, uplinks);
 
 	/*
 	 * The window is a moving average, not the last tick on its own.
@@ -3137,7 +3203,8 @@ if (length(ARGV)) {
 		 * somebody is looking. */
 		traffic_derive(snap, prev);
 		bridge_derive(snap, prev);
-		intra_derive(snap, prev);
+		// Aggregate rates already use port counters; no automatic bridge hook.
+		snap.intra = { ok: false };
 		trend_append(snap, prev);
 
 		/* The archive is merged on its own, slower clock and rides on the

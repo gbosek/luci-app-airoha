@@ -1466,6 +1466,7 @@ function createStore() {
 			 * the tile on conntrack, which counts nothing for two clients
 			 * behind the same switch. */
 			var uplink = bridge ? (bridge.uplink || bridge.wan) : null;
+			var uplinks = bridge && Array.isArray(bridge.wans) ? bridge.wans : [uplink];
 
 			if (!bridge || uplink == null || !this.portRates)
 				return null;
@@ -1475,12 +1476,12 @@ function createStore() {
 
 			Object.keys(useTotals ? (this.portTotals || {}) : this.portRates).forEach(function(dev) {
 				var r = useTotals ? this.portTotals[dev] : this.portRates[dev];
-				var bucket = (dev == uplink) ? wan : local;
+				var bucket = (uplinks.indexOf(dev) >= 0) ? wan : local;
 
 				/* rx on a member is a client's upload, tx its download; the
 				 * uplink's counters face the other way. */
-				bucket.up += (dev == uplink) ? r.tx : r.rx;
-				bucket.down += (dev == uplink) ? r.rx : r.tx;
+				bucket.up += (uplinks.indexOf(dev) >= 0) ? r.tx : r.rx;
+				bucket.down += (uplinks.indexOf(dev) >= 0) ? r.rx : r.tx;
 			}, this);
 
 			rates.lanUp = Math.max(0, local.up - wan.up);

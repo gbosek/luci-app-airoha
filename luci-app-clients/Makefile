@@ -13,22 +13,17 @@ LUCI_TITLE:=LuCI Net Clients - addresses, traffic and DNS
 # and client IPv6 addresses. Without tcpdump the snoop daemon exits quietly
 # and the page falls back to what ARP sees.
 #
-# nlbwmon is deliberately NOT a dependency: the page no longer shows the
-# month column it used to feed, and the live WAN figures come from conntrack
-# accounting alone.
-LUCI_DEPENDS:=+luci-base +ucode +ucode-mod-fs +ucode-mod-ubus +rpcd-mod-iwinfo
+LUCI_DEPENDS:=+nlbwmon +luci-base +ucode +ucode-mod-fs +ucode-mod-ubus +rpcd-mod-iwinfo
 # Deliberately NOT a dependency: luci-app-bandix. Its per-device counters are
 # exact, but they only exist with the flow offload turned off, and on a PON
 # gateway that costs more throughput than the measurement is worth. Everything
-# this page shows is derived from conntrack accounting (which the driver keeps
-# updating for PPE-offloaded flows) plus dnsmasq's own query log.
+# this page shows is derived from port counters, conntrack/nlbwmon and
+# dnsmasq's own query log. Per-host attribution remains a best-effort estimate.
 #
-# Deliberately NOT a dependency, for the same reason: nlbwmon. Its per-period
-# counters were removed from the page, and nothing else reads them.
 LUCI_DESCRIPTION:=One place for every LAN client: addresses with their source, \
 	WAN traffic, and the DNS lookups each device made.
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=2
+PKG_RELEASE:=5
 
 PKG_LICENSE:=Apache-2.0
 

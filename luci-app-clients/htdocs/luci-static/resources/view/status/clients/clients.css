@@ -194,7 +194,7 @@ html[data-argon-mode="dark"] {
 .clients-chart__svg {
 	display: block;
 	width: 100%;
-	height: auto;
+	height: 220px;
 }
 
 .clients-chart__empty {

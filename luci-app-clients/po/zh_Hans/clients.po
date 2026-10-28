@@ -319,3 +319,12 @@ msgstr "本设备工作在桥接模式，流量取自硬件端口计数器：广
 
 msgid "What stayed inside the LAN: traffic this box routed between LAN subnets, plus the frames two clients exchanged with each other, counted by an nftables rule on the bridge. A switched frame has no direction, so it is counted under both arrows."
 msgstr "本机局域网内的流量：本机在各子网之间转发的部分，加上两台客户端之间交换的帧（由网桥上的 nftables 规则统计）。交换帧没有方向，因此在上下两个箭头里各计一次。"
+
+msgid "LAN is a residual estimate from bridge-port counters after subtracting detected WAN traffic. Counter layers differ; this is not an exact switched-byte measurement."
+msgstr "局域网数值为网桥端口计数减去已识别广域网流量后的残差估计；计数层次不同，并非精确的交换字节数。"
+
+msgid "WAN rates sum the detected logical uplink counters without counting PPPoE parent ports twice. LAN is a port-counter residual estimate. Per-device figures use conntrack and nlbwmon where available; they are not a hardware offload ratio."
+msgstr "广域网速率汇总已识别的逻辑上联接口计数，不重复计算 PPPoE 物理父口。局域网为端口计数的残差估计。设备数据使用可取得的 conntrack 和 nlbwmon 计数，不能据此推算硬件卸载率。"
+
+msgid "These per-device figures use available conntrack and nlbwmon counters. Offloaded or short-lived flows may be missed; totals are estimates, not a lifetime total or a hardware offload ratio."
+msgstr "设备数据使用可取得的 conntrack 和 nlbwmon 计数，可能漏掉卸载或短连接流量。累计值为估计值，并非终身累计或硬件卸载率。"

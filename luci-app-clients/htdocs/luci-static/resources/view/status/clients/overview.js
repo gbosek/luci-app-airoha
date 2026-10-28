@@ -254,7 +254,7 @@ return L.Class.extend({
 		var totalDown = summary.lanDown + summary.wanDown;
 		var totalUpBytes = summary.lanTotalUp + summary.wanTotalUp;
 		var totalDownBytes = summary.lanTotalDown + summary.wanTotalDown;
-		var viaPorts = !!(this.store.state.bridge && this.store.state.bridge.mode);
+		var viaPorts = !!(this.store.state.bridge && (this.store.state.bridge.mode || this.store.state.bridge.wan));
 
 		/* No LAN-scope byte since the collector started, on a box that would
 		 * have to route them to see them: nothing has crossed between LAN
@@ -269,7 +269,7 @@ return L.Class.extend({
 			block(_('LAN traffic'), summary.lanUp, summary.lanDown,
 				summary.lanTotalUp, summary.lanTotalDown,
 				viaPorts
-					? _('What the clients on this LAN exchanged with each other, counted by the hardware port counters.')
+					? _('LAN is a residual estimate from bridge-port counters after subtracting detected WAN traffic. Counter layers differ; this is not an exact switched-byte measurement.')
 					: _('What stayed inside the LAN: traffic this box routed between LAN subnets, plus the frames two clients exchanged with each other, counted by an nftables rule on the bridge. A switched frame has no direction, so it is counted under both arrows.'),
 				lanIdle),
 			block(_('WAN traffic'), summary.wanUp, summary.wanDown,
@@ -374,7 +374,10 @@ return L.Class.extend({
 				return E('span', { 'class': 'clients-chart__key clients-chart__key--' + one.cls }, one.label);
 			}));
 
-		var width = 720, height = 220;
+		/* Use screen-sized coordinates: a fixed 720px viewBox scales both
+		 * the height and labels up on wide screens. Polls also remeasure the
+		 * available width after a sidebar or window resize. */
+		var width = this.chart.clientWidth || 720, height = 220;
 		var padX = 8, padTop = 14, padBottom = 10;
 		var plotW = width - padX * 2;
 		var plotH = height - padTop - padBottom;
@@ -660,6 +663,12 @@ return L.Class.extend({
 		});
 
 		this.update();
+		/* render() builds a detached pane. Measure once it has been mounted,
+		 * rather than waiting for the next data sample to fit its width. */
+		requestAnimationFrame(function() {
+			if (self.chart.isConnected)
+				self.renderChart();
+		});
 
 		poll.add(L.bind(function() {
 			var jobs;
@@ -693,7 +702,7 @@ return L.Class.extend({
 			});
 		}, this), common.TICK_INTERVAL);
 
-	var bridgeMode = !!(this.store.state.bridge && this.store.state.bridge.mode);
+	var bridgeMode = !!(this.store.state.bridge && (this.store.state.bridge.mode || this.store.state.bridge.wan));
 
 	return E('div', { 'class': 'clients-pane' }, [
 		E('div', { 'class': 'cbi-map-descr' },
@@ -715,8 +724,8 @@ return L.Class.extend({
 			this.chart,
 			E('p', { 'class': 'clients-note' },
 				bridgeMode
-					? _('This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port, LAN is what the remaining ports carried. The bracketed figures are counted by the background collector since it started.')
-					: _('Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are counted by the background collector since it started - conntrack counters belong to a flow, so they are a floor, not a lifetime total. LAN traffic is what this box routed between LAN subnets; frames between two clients of the same subnet are switched by the bridge and never reach conntrack.'))
+					? _('WAN rates sum the detected logical uplink counters without counting PPPoE parent ports twice. LAN is a port-counter residual estimate. Per-device figures use conntrack and nlbwmon where available; they are not a hardware offload ratio.')
+					: _('These per-device figures use available conntrack and nlbwmon counters. Offloaded or short-lived flows may be missed; totals are estimates, not a lifetime total or a hardware offload ratio.'))
 		])
 	]);
 	}

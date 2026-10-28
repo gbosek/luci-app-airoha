@@ -1,0 +1,12 @@
+#!/bin/sh
+# Image-time postinst cannot configure the running UCI database. Enable only
+# missing defaults for an enabled DNS collector; retain explicit user choices.
+[ "$(uci -q get clients.global.enabled)" != 0 ] || exit 0
+[ "$(uci -q get clients.dns.enabled)" != 0 ] || exit 0
+uci -q get dhcp.@dnsmasq[0] >/dev/null || exit 0
+uci -q get dhcp.@dnsmasq[0].logqueries >/dev/null ||
+    uci set dhcp.@dnsmasq[0].logqueries='1'
+uci -q get dhcp.@dnsmasq[0].logfacility >/dev/null ||
+    uci set dhcp.@dnsmasq[0].logfacility='/tmp/dnsmasq.log'
+uci commit dhcp || exit 1
+/usr/libexec/xg2010g-dnsmasq-log-guard

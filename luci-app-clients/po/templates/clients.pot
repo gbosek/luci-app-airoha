@@ -327,3 +327,12 @@ msgstr ""
 
 msgid "What stayed inside the LAN: traffic this box routed between LAN subnets, plus the frames two clients exchanged with each other, counted by an nftables rule on the bridge. A switched frame has no direction, so it is counted under both arrows."
 msgstr ""
+
+msgid "LAN is a residual estimate from bridge-port counters after subtracting detected WAN traffic. Counter layers differ; this is not an exact switched-byte measurement."
+msgstr ""
+
+msgid "WAN rates sum the detected logical uplink counters without counting PPPoE parent ports twice. LAN is a port-counter residual estimate. Per-device figures use conntrack and nlbwmon where available; they are not a hardware offload ratio."
+msgstr ""
+
+msgid "These per-device figures use available conntrack and nlbwmon counters. Offloaded or short-lived flows may be missed; totals are estimates, not a lifetime total or a hardware offload ratio."
+msgstr ""
