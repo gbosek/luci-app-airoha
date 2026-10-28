@@ -328,3 +328,9 @@ msgstr "广域网速率汇总已识别的逻辑上联接口计数，不重复计
 
 msgid "These per-device figures use available conntrack and nlbwmon counters. Offloaded or short-lived flows may be missed; totals are estimates, not a lifetime total or a hardware offload ratio."
 msgstr "设备数据使用可取得的 conntrack 和 nlbwmon 计数，可能漏掉卸载或短连接流量。累计值为估计值，并非终身累计或硬件卸载率。"
+
+msgid "Select device"
+msgstr "选择设备"
+
+msgid "All devices"
+msgstr "全部设备"
