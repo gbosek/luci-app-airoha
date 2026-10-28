@@ -317,23 +317,11 @@ msgstr "总流量"
 msgid "What the clients on this LAN exchanged with each other, counted by the hardware port counters."
 msgstr "本机局域网内各客户端之间交换的流量，由硬件端口计数器统计。"
 
-msgid "Traffic this box routed between LAN subnets. Frames between two clients of the same subnet are switched, not routed, so they never reach this counter."
-msgstr "本机在局域网各子网之间转发的流量。同一子网内两台客户端之间的数据帧由交换机直接转发、不经过路由，因此不会计入这里。"
-
 msgid "Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are counted by the background collector since it started - conntrack counters belong to a flow, so they are a floor, not a lifetime total. LAN traffic is what this box routed between LAN subnets; frames between two clients of the same subnet are switched by the bridge and never reach conntrack."
 msgstr "速率由内核 conntrack 计数器差分得出，硬件卸载的连接同样计数。括号内数字为后台采集器启动以来的累计值；conntrack 计数属于具体连接，因此只是下界，并非累计总量。局域网流量为本机在各局域网子网之间转发的流量；同一子网内两台客户端之间的数据帧由网桥直接转发，不会进入 conntrack。"
 
 msgid "This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port, LAN is what the remaining ports carried. The bracketed figures are counted by the background collector since it started."
 msgstr "本设备工作在桥接模式，流量取自硬件端口计数器：广域网为经上联端口的流量，局域网为其余端口承载的流量。括号内数字为后台采集器启动以来的累计值。"
 
-msgid "Inner-LAN traffic"
-msgstr "内网互传"
-
-msgid "This device cannot count client-to-client traffic: it needs a bridge and nftables."
-msgstr "本设备无法统计客户端之间的流量：需要网桥与 nftables。"
-
-msgid "Client-to-client traffic over the selected window."
-msgstr "所选时间窗内客户端之间的互传流量。"
-
-msgid "Frames the clients on this LAN exchanged with each other, counted by an nftables rule on the bridge. Same-subnet traffic is switched, never routed, so it is missing from the two rates above, from Total, and from conntrack."
-msgstr "本机局域网内各客户端之间交换的数据帧，由网桥上的 nftables 计数规则统计。同一子网的流量由二层交换直接转发、不经过路由，因此既不在上面两个速率里，也不在总计和 conntrack 里。"
+msgid "What stayed inside the LAN: traffic this box routed between LAN subnets, plus the frames two clients exchanged with each other, counted by an nftables rule on the bridge. A switched frame has no direction, so it is counted under both arrows."
+msgstr "本机局域网内的流量：本机在各子网之间转发的部分，加上两台客户端之间交换的帧（由网桥上的 nftables 规则统计）。交换帧没有方向，因此在上下两个箭头里各计一次。"

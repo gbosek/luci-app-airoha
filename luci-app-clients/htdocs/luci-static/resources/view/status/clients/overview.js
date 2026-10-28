@@ -40,8 +40,7 @@ var WINDOWS = [
 var TYPES = [
 	{ value: 'total', label: _('Total') },
 	{ value: 'wan', label: _('WAN') },
-	{ value: 'lan', label: _('LAN traffic') },
-	{ value: 'intra', label: _('Inner-LAN traffic') }
+	{ value: 'lan', label: _('LAN traffic') }
 ];
 
 /* Unique id counter for the chart's <linearGradient> defs: ids live in the
@@ -182,6 +181,23 @@ return L.Class.extend({
 			summary.wanTotalDown += entry.total.wanDown || 0;
 		});
 
+		/* Client-to-client traffic is LAN traffic, so it is added here rather
+		 * than shown as a figure of its own - that is what the tile means by
+		 * "LAN", and Total picks it up through the same sum. It has no
+		 * direction, so it goes under both arrows, the way a switched frame
+		 * always shows up as rx on one port and tx on another.
+		 *
+		 * Not on a bridge: there the port counters behind the branch above
+		 * already contain those frames. */
+		var intra = this.store.state.intra;
+
+		if (intra && intra.ok === true) {
+			summary.lanUp += intra.rate || 0;
+			summary.lanDown += intra.rate || 0;
+			summary.lanTotalUp += intra.total || 0;
+			summary.lanTotalDown += intra.total || 0;
+		}
+
 		return summary;
 	},
 
@@ -189,7 +205,7 @@ return L.Class.extend({
 		/* `idle` renders the tile as "not applicable" rather than "zero": on a
 		 * routed box with one LAN subnet the counter can never move, and a hard
 		 * 0 B/s there reads as a broken figure instead of an empty scope. */
-		function block(label, up, down, totalUp, totalDown, title, idle, extra) {
+		function block(label, up, down, totalUp, totalDown, title, idle) {
 			var attrs = { 'class': 'clients-block' };
 
 			if (title)
@@ -203,7 +219,8 @@ return L.Class.extend({
 				return idle ? '' : '(' + common.formatSize(value) + ')';
 			}
 
-			var rows = [
+			return E('div', attrs, [
+				E('div', { 'class': 'clients-block__title' }, label),
 				E('div', { 'class': 'clients-block__row' }, [
 					E('span', { 'class': 'clients-block__dir clients-block__dir--up' }, '↑'),
 					E('span', { 'class': 'clients-block__rate' }, rate(up)),
@@ -214,21 +231,7 @@ return L.Class.extend({
 					E('span', { 'class': 'clients-block__rate' }, rate(down)),
 					E('span', { 'class': 'clients-block__total' }, total(totalDown))
 				])
-			];
-
-			/* A third figure below the hairline: not a third direction, a
-			 * different measurement. Only the LAN tile has one. */
-			if (extra)
-				rows.push(E('div', {
-					'class': 'clients-block__row clients-block__row--intra',
-					'title': extra.title
-				}, [
-					E('span', { 'class': 'clients-block__dir clients-block__dir--intra' }, '⇄'),
-					E('span', { 'class': 'clients-block__rate' }, common.formatRate(extra.rate)),
-					E('span', { 'class': 'clients-block__total' }, '(' + common.formatSize(extra.total) + ')')
-				]));
-
-			return E('div', attrs, [ E('div', { 'class': 'clients-block__title' }, label) ].concat(rows));
+			]);
 		}
 
 		var totalUp = summary.lanUp + summary.wanUp;
@@ -243,20 +246,6 @@ return L.Class.extend({
 		var lanIdle = !viaPorts &&
 			!(summary.lanUp || summary.lanDown || summary.lanTotalUp || summary.lanTotalDown);
 
-		/* Client-to-client traffic, measured where it can be: the bridge
-		 * counter. On an AP the LAN tile above already is that figure - the
-		 * port counters sum to it - so a second row would look like a double
-		 * count. On a routed box it is the only figure that describes what the
-		 * clients do among themselves. */
-		var intra = this.store.state.intra;
-		var intraRow = (!viaPorts && intra && intra.ok === true)
-			? {
-				rate: intra.rate || 0,
-				total: intra.total || 0,
-				title: _('Frames the clients on this LAN exchanged with each other, counted by an nftables rule on the bridge. Same-subnet traffic is switched, never routed, so it is missing from the two rates above, from Total, and from conntrack.')
-			}
-			: null;
-
 		/* The LAN figure means different things depending on the role of this
 		 * box, so it says which one it is instead of leaving the reader to
 		 * wonder why a busy LAN can read zero. */
@@ -265,8 +254,8 @@ return L.Class.extend({
 				summary.lanTotalUp, summary.lanTotalDown,
 				viaPorts
 					? _('What the clients on this LAN exchanged with each other, counted by the hardware port counters.')
-					: _('Traffic this box routed between LAN subnets. Frames between two clients of the same subnet are switched, not routed, so they never reach this counter.'),
-				lanIdle, intraRow),
+					: _('What stayed inside the LAN: traffic this box routed between LAN subnets, plus the frames two clients exchanged with each other, counted by an nftables rule on the bridge. A switched frame has no direction, so it is counted under both arrows.'),
+				lanIdle),
 			block(_('WAN traffic'), summary.wanUp, summary.wanDown,
 				summary.wanTotalUp, summary.wanTotalDown),
 			block(_('Total'), totalUp, totalDown, totalUpBytes, totalDownBytes),
@@ -303,12 +292,6 @@ return L.Class.extend({
 	 * drawing code iterates this list instead of assuming two.
 	 */
 	chartSeries: function() {
-		if (this.selectedType == 'intra')
-			return [ {
-				key: 'up', cls: 'intra',
-				label: _('Inner-LAN traffic'), color: 'var(--cl-intra)'
-			} ];
-
 		return [
 			{ key: 'up', cls: 'up', label: _('Upload rate'), color: 'var(--cl-up)' },
 			{ key: 'down', cls: 'down', label: _('Download rate'), color: 'var(--cl-down)' }
@@ -326,11 +309,6 @@ return L.Class.extend({
 
 		return function(point) {
 			var source = point;
-
-			/* Per-device series only exist for conntrack traffic: a bridge
-			 * counter cannot say which client a frame belonged to. */
-			if (type == 'intra')
-				return { up: point.intra || 0 };
 
 			if (mac) {
 				source = point.byMac ? point.byMac[mac] : null;
@@ -394,17 +372,6 @@ return L.Class.extend({
 			dom.content(this.chart, [
 				E('div', { 'class': 'clients-chart__empty' },
 					_('No samples yet. The chart appears as soon as the background collector records one.'))
-			]);
-			return;
-		}
-
-		/* A device with no bridge, or without nft, has no inner-LAN series at
-		 * all - an empty chart says that, a flat line at zero would claim the
-		 * clients were measured as silent. */
-		if (this.selectedType == 'intra' && !points.some(function(p) { return p.intra != null; })) {
-			dom.content(this.chart, [
-				E('div', { 'class': 'clients-chart__empty' },
-					_('This device cannot count client-to-client traffic: it needs a bridge and nftables.'))
 			]);
 			return;
 		}
@@ -513,9 +480,7 @@ return L.Class.extend({
 			'<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" class="clients-chart__svg"'
 			+ ' style="display:block;cursor:crosshair" role="img">'
 			+ '<title>' + esc(_('Traffic trend')) + '</title>'
-			+ '<desc>' + esc(this.selectedType == 'intra'
-				? _('Client-to-client traffic over the selected window.')
-				: _('Upload and download rates over the selected window.')) + '</desc>'
+			+ '<desc>' + esc(_('Upload and download rates over the selected window.')) + '</desc>'
 			+ '<defs>' + defs + '</defs>'
 			+ '<g>' + grid + '</g>'
 			+ marks
@@ -706,9 +671,6 @@ return L.Class.extend({
 
 		typeSelect.addEventListener('change', function() {
 			self.selectedType = typeSelect.value;
-			/* The device picker filters the per-device conntrack series, and a
-			 * bridge counter cannot say which client a frame belonged to. */
-			self.deviceSelect.disabled = (self.selectedType == 'intra');
 			self.renderChart();
 		});
 

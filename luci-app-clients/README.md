@@ -49,9 +49,8 @@ The sampling clock belongs to the collector, not to the browser: every pass
 walks conntrack once and writes `/tmp/clients-snapshot.json`, with `rates`,
 `totals` and the `rate_window` they were divided by, plus one `trend` point
 (the summed LAN/WAN rates, the inner-LAN figure, and on a routed box the busiest
-eight devices). The chart's *Type* selector picks one of four: total, WAN, LAN
-(the routed scope above) and inner-LAN traffic, the last drawn as a single line
-because it has no direction. The
+eight devices). The chart's *Type* selector picks one of three - total, WAN, LAN -
+and the LAN series already has the inner-LAN traffic folded into it. The
 series holds 180 points - 30 minutes at the default cadence, enough for the
 widest window the page offers - so the chart is already drawn from history when
 the page opens instead of filling in from the moment someone looks. Opening the
@@ -81,6 +80,10 @@ from the hardware port counters instead: WAN is the uplink port, LAN is the sum
 of the remaining member ports. Those counters do see client-to-client traffic,
 so the LAN tile is meaningful there.
 
+On a routed box the tile gets that traffic back from the counter described in the
+next section, so "LAN" means the same thing on both: everything that did not
+leave through the WAN.
+
 ### Counting the traffic conntrack cannot see
 
 Switched frames are invisible to layer 3, so the page measures them where the
@@ -108,12 +111,16 @@ be left out:
   frames remain.
 
 The counter has **no direction**: both ends of the exchange are clients, so
-upload and download have no meaning. The overview shows it on its own line under
-the LAN rates (marked `⇄`), and the chart offers it as its own type, drawn as a
-single line.
+upload and download have no meaning. It is therefore folded into the LAN figure
+rather than shown beside it - a frame lands under both arrows, which is what the
+hardware port counters behind an AP's LAN tile have always done: a switched frame
+is rx on one port and tx on another. Nothing is listed separately, and `Total`
+picks it up through the same sum.
 
-It is not part of Total: on an AP the port counters behind the LAN tile already
-include it, and adding it again would count those frames twice.
+On an AP the counter is read for diagnostics only: the port counters behind the
+LAN tile already contain those frames, and adding it again would count them
+twice. `clients-probe status` prints what the collector last saw, and
+`clients-probe intra` reads the counter directly.
 
 Installed by `clients-probe intra-setup` at start-up, rebuilt on every service
 reload and on a firewall reload, and removed by `stop`. A manual `nft flush

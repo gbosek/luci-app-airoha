@@ -38,9 +38,6 @@
 	--cl-ip4-manual: #be123c;
 	--cl-up: #c2410c;
 	--cl-down: #0f766e;
-	/* Client-to-client traffic inside the LAN: one series without a direction,
-	 * so it needs a colour that is neither the upload nor the download one. */
-	--cl-intra: #6d28d9;
 }
 
 html[data-argon-mode="dark"] {
@@ -57,7 +54,6 @@ html[data-argon-mode="dark"] {
 	--cl-ip4-manual: #fb7185;
 	--cl-up: #ffb27a;
 	--cl-down: #5eead4;
-	--cl-intra: #c4b5fd;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -76,7 +72,6 @@ html[data-argon-mode="dark"] {
 		--cl-ip4-manual: #fb7185;
 		--cl-up: #ffb27a;
 		--cl-down: #5eead4;
-		--cl-intra: #c4b5fd;
 	}
 }
 
@@ -121,22 +116,6 @@ html[data-argon-mode="dark"] {
 
 .clients-block__dir--up { color: var(--cl-up); }
 .clients-block__dir--down { color: var(--cl-down); }
-.clients-block__dir--intra { color: var(--cl-intra); }
-
-/* The one figure that has no direction: separated from the two rates above it
- * by a hairline, so it reads as a different quantity rather than a third
- * direction. */
-.clients-block__row--intra {
-	margin-top: .3rem;
-	padding-top: .3rem;
-	border-top: 1px dashed var(--cl-rule);
-}
-
-.clients-block__row--intra .clients-block__rate {
-	font-size: .95rem;
-	color: var(--cl-intra);
-}
-
 .clients-block__rate {
 	font-size: 1.05rem;
 	font-weight: 500;
@@ -254,7 +233,6 @@ html[data-argon-mode="dark"] {
 
 .clients-chart__key--up::before { background: var(--cl-up); }
 .clients-chart__key--down::before { background: var(--cl-down); }
-.clients-chart__key--intra::before { background: var(--cl-intra); }
 
 /* ---------------- filters ---------------- */
 

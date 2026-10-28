@@ -319,23 +319,11 @@ msgstr ""
 msgid "What the clients on this LAN exchanged with each other, counted by the hardware port counters."
 msgstr ""
 
-msgid "Traffic this box routed between LAN subnets. Frames between two clients of the same subnet are switched, not routed, so they never reach this counter."
-msgstr ""
-
 msgid "Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are counted by the background collector since it started - conntrack counters belong to a flow, so they are a floor, not a lifetime total. LAN traffic is what this box routed between LAN subnets; frames between two clients of the same subnet are switched by the bridge and never reach conntrack."
 msgstr ""
 
 msgid "This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port, LAN is what the remaining ports carried. The bracketed figures are counted by the background collector since it started."
 msgstr ""
 
-msgid "Inner-LAN traffic"
-msgstr ""
-
-msgid "This device cannot count client-to-client traffic: it needs a bridge and nftables."
-msgstr ""
-
-msgid "Client-to-client traffic over the selected window."
-msgstr ""
-
-msgid "Frames the clients on this LAN exchanged with each other, counted by an nftables rule on the bridge. Same-subnet traffic is switched, never routed, so it is missing from the two rates above, from Total, and from conntrack."
+msgid "What stayed inside the LAN: traffic this box routed between LAN subnets, plus the frames two clients exchanged with each other, counted by an nftables rule on the bridge. A switched frame has no direction, so it is counted under both arrows."
 msgstr ""

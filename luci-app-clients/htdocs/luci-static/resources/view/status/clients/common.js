@@ -937,18 +937,34 @@ function sortValue(entry, key) {
  * every point it appears in - so it is widened back into the objects the chart
  * already reads.
  */
-function decodeTrendPoint(point) {
+/*
+ * One stored point, widened back into the shape the chart reads.
+ *
+ * `intra` - the frames two clients of the same subnet exchanged - belongs to
+ * the LAN figure, so it is folded in here and not drawn separately. It has no
+ * direction (both ends are clients, and the bridge counter sees each frame
+ * once), so it lands under both arrows, which is what the hardware port
+ * counters behind an AP have always done: a switched frame is rx on one port
+ * and tx on another.
+ *
+ * `viaPorts` says the point already came from those port counters, where the
+ * same frames are in the figures by construction - adding them again would
+ * count them twice.
+ */
+function decodeTrendPoint(point, viaPorts) {
+	var intra = (point.intra != null) ? (Number(point.intra) || 0) : 0;
+	var extra = viaPorts ? 0 : intra;
+
 	var decoded = {
 		t: Number(point.t) || 0,
 		valid: point.valid !== false,
-		lanUp: point.lanUp || 0,
-		lanDown: point.lanDown || 0,
+		lanUp: (point.lanUp || 0) + extra,
+		lanDown: (point.lanDown || 0) + extra,
 		wanUp: point.wanUp || 0,
 		wanDown: point.wanDown || 0,
-		/* Absent rather than zero when the collector could not measure it: a
-		 * device without a bridge or without nft has no such series, and the
-		 * chart must not draw a floor line for a figure nobody measured. */
-		intra: (point.intra != null) ? (Number(point.intra) || 0) : null,
+		/* Kept as measured, for the summary and for anything that wants the
+		 * breakdown this merges away. */
+		intra: (point.intra != null) ? intra : null,
 		byMac: Object.create(null)
 	};
 
@@ -1120,7 +1136,9 @@ function createStore() {
 			self.state.intra = (data.intra && data.intra.ok === true) ? data.intra : null;
 
 			if (self.trendFromFile)
-				self.trend = data.trend.map(decodeTrendPoint);
+				self.trend = data.trend.map(function(point) {
+					return decodeTrendPoint(point, !!(bridge && bridge.mode));
+				});
 
 			self.state.interfaces = data.interfaces || [];
 			self.state.arp = data.arp || [];
