@@ -216,10 +216,10 @@ msgstr ""
 msgid "Collecting samples. The chart fills in as the page stays open."
 msgstr ""
 
-msgid "Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are what this view has seen while it was open - conntrack counters belong to a flow, so they are a floor, not a lifetime total."
+msgid "Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are counted by the background collector since it started - conntrack counters belong to a flow, so they are a floor, not a lifetime total."
 msgstr ""
 
-msgid "Traffic seen while this view was open. conntrack counters belong to a flow, so the figure is a floor, not a lifetime total."
+msgid "Traffic counted by the background collector since it started. conntrack counters belong to a flow, so the figure is a floor, not a lifetime total."
 msgstr ""
 
 msgid "DNS query records"
@@ -316,7 +316,7 @@ msgstr ""
 msgid "WAN counts traffic to addresses outside this network; traffic between local hosts is not shown. Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows."
 msgstr ""
 
-msgid "This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port. The bracketed figures accumulate while this view is open."
+msgid "This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port. The bracketed figures are counted by the background collector since it started."
 msgstr ""
 
 msgid "Live rate"

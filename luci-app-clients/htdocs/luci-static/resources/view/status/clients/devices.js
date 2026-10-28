@@ -216,7 +216,7 @@ return L.Class.extend({
 		]);
 	},
 
-	/* The session total keeps both directions in one cell, arrows included:
+	/* The running total keeps both directions in one cell, arrows included:
 	 * it is deliberately quiet - a floor, not a lifetime figure - so giving it
 	 * the same weight as the rates would invite the wrong reading. */
 	totalCell: function(entry) {
@@ -225,7 +225,7 @@ return L.Class.extend({
 
 		return E('div', {
 			'class': 'clients__traffic-total',
-			'title': _('Traffic seen while this view was open. conntrack counters belong to a flow, so the figure is a floor, not a lifetime total.')
+			'title': _('Traffic counted by the background collector since it started. conntrack counters belong to a flow, so the figure is a floor, not a lifetime total.')
 		}, [
 			E('span', {}, '↑ ' + common.formatSize(entry.total.wanUp || 0)),
 			E('span', {}, '↓ ' + common.formatSize(entry.total.wanDown || 0))

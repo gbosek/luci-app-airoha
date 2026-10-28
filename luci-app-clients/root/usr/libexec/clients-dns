@@ -48,6 +48,19 @@ const DEFAULT_LOG = '/tmp/dnsmasq.log';
  * enough to rewrite on every pass without noticing. */
 const MAX_RECORDS = 1000;
 
+/* ...and a hard byte ceiling on top of the row count: /tmp is RAM, and the
+ * init script sets the same bound for every cache the app keeps there. Handed
+ * in as the first argument so this loop does not fork uci for a constant. A
+ * missing or unusable argument keeps the built-in bound rather than lifting
+ * it: ucode answers NaN for a non-numeric string, which would compare false
+ * against every length and silently disable the cap. */
+const DEFAULT_MAX_BYTES = 262144;
+const MAX_BYTES = (function() {
+	let n = int(ARGV[1] ?? '');
+
+	return (n == null || n != n || n <= 0) ? DEFAULT_MAX_BYTES : n;
+})();
+
 /* A query that never got an answer is forgotten after this long: dnsmasq can
  * drop a lookup silently (server timeout), and keeping the half-record forever
  * would leave a row that always says "pending". */
@@ -232,6 +245,14 @@ let load_archive = function() {
 
 let write_archive = function(data) {
 	let text = sprintf('%J\n', data);
+
+	/* Over the ceiling, the oldest rows go first: records are chronological,
+	 * so the head of the array is what the page shows last. Dropping an eighth
+	 * at a time keeps this to a handful of serialisations. */
+	while (length(text) > MAX_BYTES && length(data.records) > 0) {
+		data.records = slice(data.records, (int(length(data.records) / 8) + 1));
+		text = sprintf('%J\n', data);
+	}
 
 	if (fs.writefile(ARCHIVE + '.new', text) != length(text))
 		return false;

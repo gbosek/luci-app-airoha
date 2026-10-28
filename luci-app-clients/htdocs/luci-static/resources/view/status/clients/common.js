@@ -10,43 +10,55 @@
 /*
  * Shared core of the Clients pages.
  *
- * Three views - overview, devices, DNS - read the same two archives and merge
- * the same three sources, so the merge lives here once:
+ * Three views - overview, devices, DNS - read the same files and merge the same
+ * three sources, so the merge lives here once:
  *
- *   addresses   ARP + IPv6 neighbour cache     (probe)   who is reachable now
- *   rates       nf_conntrack byte counters     (probe)   LAN and WAN, split
- *   wireless    iwinfo assoclist               (probe)   which AP, SSID, signal
+ *   snapshot    /tmp/clients-snapshot.json     (init)    addresses, rates, wifi
  *   archive     /tmp/clients-history.json      (init)    first / last seen
  *
- * The probe reports cumulative conntrack counters; turning them into a rate is
- * this layer's job because it knows the wall-clock distance between two of its
- * own samples. A helper keeping its own timer would need a daemon of its own.
+ * The snapshot carries what the probe knows - ARP and the IPv6 neighbour cache
+ * (who is reachable now), nf_conntrack byte counters and iwinfo assoclists
+ * (which AP, SSID, signal) - with the cumulative counters already
+ * differentiated into rates and running totals by the collector that wrote it.
+ * That is the point of the file: the sampling clock belongs to the background
+ * loop, so opening this page reads one document instead of starting a
+ * measurement, and a second viewer costs nothing at all.
+ *
+ * When the file is missing - the service is stopped, or an older probe is
+ * installed - the page falls back to asking the probe directly and doing the
+ * differencing itself, which is what it used to do on every single poll.
  *
  * Nothing here is aware of a specific page. Each view builds a store, polls it,
  * and renders whatever it needs from the same merged rows.
  */
 
 var PROBE = '/usr/libexec/clients-probe';
+var SNAPSHOT_PATH = '/tmp/clients-snapshot.json';
 var HISTORY_PATH = '/tmp/clients-history.json';
 var DNS_ARCHIVE = '/tmp/clients-dns.json';
 var STYLESHEET = 'view/status/clients/clients.css';
 
-/* Five seconds, not two: one sample walks the whole conntrack table and a box
- * can carry six bridged VLANs. The floor that matters is that the number moves
- * while someone watches it. */
+/* How often the page reads the snapshot, not how often it is taken. Five
+ * seconds keeps the counters moving while someone watches; the collector's own
+ * cadence decides how much of that is new. */
 var SAMPLE_INTERVAL = 5;
 var LEASE_INTERVAL = 30;
 var HISTORY_INTERVAL = 30;
 
-/* A gap this long means the tab was hidden or the timer was throttled; dividing
- * the accumulated bytes by it would invent a spike, so only the baseline is
- * refreshed. */
+/* Fallback path only: a gap this long means the tab was hidden or the timer was
+ * throttled, and dividing the accumulated bytes by it would invent a spike, so
+ * the baseline is refreshed instead. */
 var RESYNC_GAP = 15000;
 
-/* How much of the trend chart is kept in memory. One sample per SAMPLE_INTERVAL
- * at 300 points is 25 minutes, which covers the "last 10 minutes" window the
- * carrier pages offer with room to spare. */
+/* How much of the trend chart is kept in memory. One point per collector pass
+ * at 300 points covers the "last 10 minutes" window the carrier pages offer
+ * with room to spare. */
 var TREND_POINTS = 300;
+
+/* The six counters every traffic row carries, flat. The probe nests the LAN/WAN
+ * split; the rate maths and the cache both want it flat, so it is flattened
+ * once per row. */
+var COUNTER_KEYS = [ 'up', 'down', 'lanUp', 'lanDown', 'wanUp', 'wanDown' ];
 
 var callDHCPLeases = rpc.declare({
 	object: 'luci-rpc',
@@ -392,7 +404,10 @@ function buildClients(state) {
 				vlan: null,
 				iface: null,
 				rate: null,
-				total: { up: 0, down: 0 },
+				/* All six counters from the start: the merge below adds to
+				 * them one by one, and a missing key would turn a page full of
+				 * totals into NaN. */
+				total: zeroCounters(),
 				stored: null,
 				conns: null,
 				first: null,
@@ -913,6 +928,35 @@ function sortValue(entry, key) {
  * cumulative counters, the archives, and the lease/hint data - everything the
  * three views ask for, fetched once per poll instead of once per view.
  */
+/* ---------------- counters ---------------- */
+
+function zeroCounters() {
+	return { up: 0, down: 0, lanUp: 0, lanDown: 0, wanUp: 0, wanDown: 0 };
+}
+
+function flatCounters(entry) {
+	return {
+		up: (entry && entry.up) || 0,
+		down: (entry && entry.down) || 0,
+		lanUp: (entry && entry.lan && entry.lan.up) || 0,
+		lanDown: (entry && entry.lan && entry.lan.down) || 0,
+		wanUp: (entry && entry.wan && entry.wan.up) || 0,
+		wanDown: (entry && entry.wan && entry.wan.down) || 0
+	};
+}
+
+function diffCounters(current, previous) {
+	var out = {};
+
+	/* A flow can expire between two samples and take its bytes with it; a
+	 * negative delta is clamped rather than reported as a jump backwards. */
+	COUNTER_KEYS.forEach(function(key) {
+		out[key] = Math.max(0, current[key] - (previous[key] || 0));
+	});
+
+	return out;
+}
+
 function createStore() {
 	return {
 		samples: null,
@@ -924,11 +968,16 @@ function createStore() {
 		archive: {},
 		archiveUpdated: 0,
 		trend: null,
-		/* False until a fetch saw a previous sample to differentiate against.
-		 * The first rate of a session is unknown, not zero - marking the point
-		 * lets the trend chart break the line there instead of drawing the
-		 * fake rise from 0 that reads as a triangle. */
+		/* False until a snapshot carried a real measurement window. The first
+		 * rate of a session is unknown, not zero - marking the point lets the
+		 * trend chart break the line there instead of drawing the fake rise
+		 * from 0 that reads as a triangle. */
 		baselineSeen: false,
+		/* The timestamp of the snapshot currently applied, and the one the last
+		 * trend point came from. A poll that lands between two collector
+		 * passes must not apply or plot the same numbers again. */
+		lastSnapshotTs: 0,
+		lastTrendTs: 0,
 		lastLeaseLoad: 0,
 		lastHistoryLoad: 0,
 		state: {
@@ -950,139 +999,172 @@ function createStore() {
 			ip4Source: Object.create(null)
 		},
 
+		/* Read the snapshot the collector wrote. Its clock, not this page's: the
+		 * file is refreshed whether or not anyone is looking, and it already
+		 * carries the rates, so opening the page starts no measurement. */
 		fetchSnapshot: function() {
 			var self = this;
 
-			return fs.exec_direct(PROBE, []).then(function(output) {
-				/* Evaluated before anything below overwrites the previous
-				 * samples: this fetch can only produce a real rate when at
-				 * least one earlier sample existed to diff against. */
-				var hadBaseline = (self.samples != null) || (self.portSamples != null);
+			return L.resolveDefault(fs.read(SNAPSHOT_PATH), '').then(function(text) {
+				var data = null;
 
-				if (hadBaseline)
+				try {
+					data = text ? JSON.parse(text) : null;
+				}
+				catch (e) {
+					data = null;
+				}
+
+				if (data && data.traffic)
+					return self.applySnapshot(data);
+
+				/* No cache: the sampler is stopped, or an older probe is
+				 * installed. Take one live snapshot and differentiate here, so
+				 * the page still shows traffic instead of nothing. */
+				return fs.exec_direct(PROBE, []).then(function(output) {
+					return self.applySnapshot(JSON.parse(output));
+				});
+			});
+		},
+
+		/*
+		 * Apply one snapshot - from the cache or from a live call - to the
+		 * store.
+		 *
+		 * The poll can outrun the collector, and a file that has not changed
+		 * since the last poll must not be applied twice: the chart would get
+		 * two points for one measurement.
+		 */
+		applySnapshot: function(data) {
+			var self = this;
+			var ts = Number(data.ts) || Math.round(Date.now() / 1000);
+
+			if (self.lastSnapshotTs === ts)
+				return data;
+
+			self.lastSnapshotTs = ts;
+
+			var bridge = data.bridge || null;
+
+			if (data.rates != null) {
+				/* The collector says how long the window was; zeroes without a
+				 * window mean "no baseline yet", which is not the same as an
+				 * idle network and must not become a chart point. */
+				if (Number(data.rate_window) > 0)
 					self.baselineSeen = true;
 
-				var data = JSON.parse(output);
-				var now = Date.now();
-				var samples = Object.create(null);
-				var rates = Object.create(null);
-				var totals = self.totals || Object.create(null);
-				var traffic = data.traffic || {};
+				self.rates = data.rates;
+				self.totals = data.totals || {};
 
-				Object.keys(traffic).forEach(function(ip) {
-					var current = traffic[ip];
-					var previous = self.samples ? self.samples[ip] : null;
-					var total = totals[ip] || {
-						up: 0, down: 0, lanUp: 0, lanDown: 0, wanUp: 0, wanDown: 0
-					};
+				/* The bridge port counters are differentiated the same way and
+				 * live in the same file; on a bridging device they are the only
+				 * rates that survive the offload. */
+				self.portRates = (bridge && bridge.rates) || null;
+				self.portTotals = (bridge && bridge.totals) || null;
 
-					if (previous && (now - previous.ts) > RESYNC_GAP)
-						previous = null;
-
-					if (previous) {
-						var seconds = Math.max((now - previous.ts) / 1000, 0.5);
-
-						/* A counter can move backwards when a flow expires between
-						 * samples; negative deltas are clamped to zero instead of
-						 * producing a bogus negative rate. */
-						function delta(cur, prev) { return Math.max(0, (cur || 0) - (prev || 0)); }
-
-						var d = {
-							up: delta(current.up, previous.up),
-							down: delta(current.down, previous.down),
-							lanUp: delta(current.lan && current.lan.up, previous.lanUp),
-							lanDown: delta(current.lan && current.lan.down, previous.lanDown),
-							wanUp: delta(current.wan && current.wan.up, previous.wanUp),
-							wanDown: delta(current.wan && current.wan.down, previous.wanDown)
-						};
-
-						rates[ip] = {
-							up: d.up / seconds,
-							down: d.down / seconds,
-							lanUp: d.lanUp / seconds,
-							lanDown: d.lanDown / seconds,
-							wanUp: d.wanUp / seconds,
-							wanDown: d.wanDown / seconds
-						};
-
-						total = {
-							up: total.up + d.up,
-							down: total.down + d.down,
-							lanUp: total.lanUp + d.lanUp,
-							lanDown: total.lanDown + d.lanDown,
-							wanUp: total.wanUp + d.wanUp,
-							wanDown: total.wanDown + d.wanDown
-						};
-					}
-
-					totals[ip] = total;
-					samples[ip] = {
-						ts: now,
-						up: current.up,
-						down: current.down,
-						lanUp: current.lan && current.lan.up,
-						lanDown: current.lan && current.lan.down,
-						wanUp: current.wan && current.wan.up,
-						wanDown: current.wan && current.wan.down
-					};
-				});
-
-				/* Addresses that disappear keep their accumulated total, so a host
-				 * that drops off and comes back does not restart at zero. */
-				self.samples = samples;
-				self.rates = rates;
-				self.totals = totals;
-
-				/* The bridge port counters get the same differentiation. On a
-				 * bridging device this is where the overview's rates come from:
-				 * the port counters are hardware and keep counting through the
-				 * offload that freezes conntrack at zero. */
-				var bridge = data.bridge || null;
-				var portSamples = Object.create(null);
-				var portRates = Object.create(null);
-				var portTotals = self.portTotals || Object.create(null);
-
-				Object.keys((bridge && bridge.ports) || {}).forEach(function(dev) {
-					var current = bridge.ports[dev];
-					var previous = self.portSamples ? self.portSamples[dev] : null;
-					var total = portTotals[dev] || { rx: 0, tx: 0 };
-					var rate = { rx: 0, tx: 0 };
-
-					if (previous && (now - previous.ts) > RESYNC_GAP)
-						previous = null;
-
-					if (previous) {
-						var seconds = Math.max((now - previous.ts) / 1000, 0.5);
-						var dRx = Math.max(0, (current.rx || 0) - (previous.rx || 0));
-						var dTx = Math.max(0, (current.tx || 0) - (previous.tx || 0));
-
-						rate = { rx: dRx / seconds, tx: dTx / seconds };
-						total = { rx: total.rx + dRx, tx: total.tx + dTx };
-					}
-
-					portTotals[dev] = total;
-					portRates[dev] = rate;
-					portSamples[dev] = { ts: now, rx: current.rx || 0, tx: current.tx || 0 };
-				});
-
-				self.portSamples = portSamples;
-				self.portRates = portRates;
-				self.portTotals = portTotals;
+				self.samples = null;
+				self.portSamples = null;
+			}
+			else {
+				self.differentiate(data, ts * 1000);
+			}
 
 			self.state.interfaces = data.interfaces || [];
 			self.state.arp = data.arp || [];
 			self.state.neigh6 = data.neigh6 || [];
 			self.state.wifi = data.wifi || {};
 			self.state.wifiRadios = (data.wifi_radios != null) ? data.wifi_radios : null;
-			self.state.traffic = traffic;
-				self.state.stats = data.stats || null;
-				self.state.bridge = bridge;
-				self.state.snoop4 = Array.isArray(data.snoop4) ? data.snoop4 : [];
-				self.state.snoop6 = Array.isArray(data.snoop6) ? data.snoop6 : [];
-				self.state.names = (data.names && typeof data.names == 'object') ? data.names : {};
+			self.state.traffic = data.traffic || {};
+			self.state.stats = data.stats || null;
+			self.state.bridge = bridge;
+			self.state.snoop4 = Array.isArray(data.snoop4) ? data.snoop4 : [];
+			self.state.snoop6 = Array.isArray(data.snoop6) ? data.snoop6 : [];
+			self.state.names = (data.names && typeof data.names == 'object') ? data.names : {};
 
-				return data;
+			return data;
+		},
+
+		/*
+		 * Fallback path: turn the absolute counters into rates against the
+		 * sample this page took last time. Kept because a page updated without
+		 * the service restarted is a real state to be in, and showing no
+		 * traffic at all is worse than computing it here.
+		 */
+		differentiate: function(data, now) {
+			var self = this;
+			var hadBaseline = (self.samples != null) || (self.portSamples != null);
+
+			if (hadBaseline)
+				self.baselineSeen = true;
+
+			var samples = Object.create(null);
+			var rates = Object.create(null);
+			var totals = self.totals || Object.create(null);
+			var traffic = data.traffic || {};
+
+			Object.keys(traffic).forEach(function(ip) {
+				var current = flatCounters(traffic[ip]);
+				var previous = self.samples ? self.samples[ip] : null;
+				var acc = totals[ip] || zeroCounters();
+
+				if (previous && (now - previous.ts) > RESYNC_GAP)
+					previous = null;
+
+				if (previous) {
+					var seconds = Math.max((now - previous.ts) / 1000, 0.5);
+					var diff = diffCounters(current, previous);
+
+					rates[ip] = zeroCounters();
+
+					COUNTER_KEYS.forEach(function(key) {
+						rates[ip][key] = diff[key] / seconds;
+						acc[key] += diff[key];
+					});
+				}
+
+				/* Addresses that disappear keep their accumulated total, so a
+				 * host that drops off and comes back does not restart at zero. */
+				current.ts = now;
+				samples[ip] = current;
+				totals[ip] = acc;
 			});
+
+			self.samples = samples;
+			self.rates = rates;
+			self.totals = totals;
+
+			var bridge = data.bridge || {};
+			var portSamples = Object.create(null);
+			var portRates = Object.create(null);
+			var portTotals = self.portTotals || Object.create(null);
+
+			Object.keys(bridge.ports || {}).forEach(function(dev) {
+				var current = { rx: bridge.ports[dev].rx || 0, tx: bridge.ports[dev].tx || 0 };
+				var previous = self.portSamples ? self.portSamples[dev] : null;
+				var acc = portTotals[dev] || { rx: 0, tx: 0 };
+				var rate = { rx: 0, tx: 0 };
+
+				if (previous && (now - previous.ts) > RESYNC_GAP)
+					previous = null;
+
+				if (previous) {
+					var seconds = Math.max((now - previous.ts) / 1000, 0.5);
+					var dRx = Math.max(0, current.rx - previous.rx);
+					var dTx = Math.max(0, current.tx - previous.tx);
+
+					rate = { rx: dRx / seconds, tx: dTx / seconds };
+					acc = { rx: acc.rx + dRx, tx: acc.tx + dTx };
+				}
+
+				current.ts = now;
+				portSamples[dev] = current;
+				portRates[dev] = rate;
+				portTotals[dev] = acc;
+			});
+
+			self.portSamples = portSamples;
+			self.portRates = portRates;
+			self.portTotals = portTotals;
 		},
 
 		/* On a bridge (AP) the hardware port counters are the only traffic
@@ -1203,11 +1285,25 @@ function createStore() {
 			if (!this.trend)
 				this.trend = [];
 
-			var point = { t: Date.now(), lanUp: 0, lanDown: 0, wanUp: 0, wanDown: 0 };
+			/* Two polls can land inside one collector pass. That is one
+			 * measurement, so it is one point - the previous one is still the
+			 * newest thing known. */
+			if (this.lastTrendTs === this.lastSnapshotTs && this.trend.length)
+				return this.trend[this.trend.length - 1];
+
+			this.lastTrendTs = this.lastSnapshotTs;
+
+			/* Stamped with the snapshot's own time, not the browser's: the
+			 * point belongs to when it was measured, and a router whose clock
+			 * differs from this machine's would otherwise scatter the axis. */
+			var point = {
+				t: this.lastSnapshotTs * 1000 || Date.now(),
+				lanUp: 0, lanDown: 0, wanUp: 0, wanDown: 0
+			};
 			var l2 = this.bridgeRates(false);
 
 			if (l2) {
-			point.lanUp = l2.lanUp;
+				point.lanUp = l2.lanUp;
 				point.lanDown = l2.lanDown;
 				point.wanUp = l2.wanUp;
 				point.wanDown = l2.wanDown;
@@ -1238,15 +1334,15 @@ function createStore() {
 				if (!entry.mac || !entry.rate)
 					return;
 
-			point.byMac[entry.mac] = {
-							up: entry.rate.up,
-							down: entry.rate.down,
-							lanUp: entry.rate.lanUp,
-							lanDown: entry.rate.lanDown,
-							wanUp: entry.rate.wanUp,
-							wanDown: entry.rate.wanDown
-						};
-				});
+				point.byMac[entry.mac] = {
+					up: entry.rate.up,
+					down: entry.rate.down,
+					lanUp: entry.rate.lanUp,
+					lanDown: entry.rate.lanDown,
+					wanUp: entry.rate.wanUp,
+					wanDown: entry.rate.wanDown
+				};
+			});
 
 			point.valid = (this.baselineSeen === true);
 			this.trend.push(point);
@@ -1304,6 +1400,7 @@ function loadOUI() {
  */
 var Common = L.Class.extend({
 	PROBE: PROBE,
+	SNAPSHOT_PATH: SNAPSHOT_PATH,
 	HISTORY_PATH: HISTORY_PATH,
 	DNS_ARCHIVE: DNS_ARCHIVE,
 	STYLESHEET: STYLESHEET,

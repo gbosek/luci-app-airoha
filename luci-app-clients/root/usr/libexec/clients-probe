@@ -51,16 +51,34 @@
  *
  * Subcommands:
  *
- *   clients-probe collect           sample, merge into the history file
- *   clients-probe read              print the history file
- *   clients-probe clear             empty the history file
- *   clients-probe status            history file summary
+ *   clients-probe collect [history] [retention] [every] [snapshot] [max_bytes]
+ *                          sample, refresh the live cache, merge into history
+ *   clients-probe read     print the history file
+ *   clients-probe clear    empty the history file
+ *   clients-probe status   file sizes and history summary
  *
  * The history is what makes the page more than a live view: first and last seen
  * survive a station going away, and the wireless association (SSID, band,
  * signal) survives a client roaming off this AP. It is written to /tmp on
  * purpose - a status page must not wear the flash - so it resets on reboot. The
  * page says so instead of pretending otherwise.
+ *
+ * The sampling clock belongs to the collector, not to the browser. `collect`
+ * writes the snapshot it just built to /tmp/clients-snapshot.json with the
+ * cumulative counters already differentiated against the previous pass: `rates`
+ * and `totals` per address, `rates` and `totals` per bridge port, plus
+ * `rate_window`, the length of the interval they were divided by (0 when there
+ * was no usable baseline). Opening the page then reads one file - no conntrack
+ * walk per viewer, and two tabs cost exactly as much as one. `every` decouples
+ * the archive merge from that cadence: the live file is rewritten on every
+ * pass, the history only when it is due, and the stamp that decides it is kept
+ * in the live file so the loop carries no state of its own.
+ *
+ * Every file written here is capped in bytes, not merely in rows: /tmp is RAM,
+ * and a cache whose shape grows with the number of addresses seen would
+ * eventually eat it. A document over `max_bytes` gives up its least interesting
+ * rows until it fits, so a pathological network costs one bounded file per
+ * cache instead of the box.
  *
  * Two design notes carried over from the ONU host list, both learned on target:
  *
@@ -83,7 +101,27 @@ const CONNTRACK_COUNT = '/proc/sys/net/netfilter/nf_conntrack_count';
 const CONNTRACK_MAX = '/proc/sys/net/netfilter/nf_conntrack_max';
 
 const DEFAULT_HISTORY = '/tmp/clients-history.json';
+const DEFAULT_SNAPSHOT = '/tmp/clients-snapshot.json';
 const SNOOP_FILE = '/tmp/clients-snoop.json';
+const DNS_FILE = '/tmp/clients-dns.json';
+
+/* Every writer is capped in bytes, not only in rows. /tmp is RAM, so the worst
+ * case has to be a constant that was chosen, not a function of how many
+ * addresses a network happened to hand out: 256 KiB per file is several times
+ * what a /24 of real clients needs and a rounding error in the memory of any
+ * box that can run this page. */
+const DEFAULT_MAX_BYTES = 262144;
+
+/* Rows kept in the live snapshot. The kernel's own conntrack table is smaller
+ * than this on every device that runs the page; the bound exists so that a
+ * stale row cannot outlive the flow that created it. */
+const MAX_TRAFFIC_ROWS = 1024;
+
+/* A rate is only meaningful across a short window. If the collector was
+ * stopped, suspended or simply ran late, the counters moved but the interval
+ * is unknown - dividing by it would invent a rate, so the baseline is dropped
+ * and the pass after it starts a new one. */
+const RATE_MAX_GAP = 60;
 
 /* A passive observation this fresh counts as the host speaking right now.
  * Older observations keep attributing the address but stop marking the row
@@ -123,6 +161,18 @@ function read(path) {
 	}
 
 	return data ?? '';
+}
+
+/* ucode answers 0 for `int(null)` and NaN for a non-numeric string, so a
+ * missing argument never falls through `?? fallback` - it just becomes zero.
+ * Every numeric argument is read through here instead. */
+function number_arg(value, fallback) {
+	if (value == null || length(value) == 0)
+		return fallback;
+
+	let n = int(value);
+
+	return (n == null || n != n) ? fallback : n;
 }
 
 function is_hex(text, maxlen) {
@@ -1722,6 +1772,289 @@ function snapshot(withPtr) {
 	};
 }
 
+/* ---------------- live cache ---------------- */
+
+/*
+ * The counters in `traffic` and in `bridge.ports` are absolute. Turning them
+ * into a rate needs the previous pass, and that is the whole reason the cache
+ * exists: the knowledge is kept next to the numbers on disk instead of in a
+ * browser tab, so a reader only has to subtract nothing - it reads `rates`.
+ */
+
+function cache_load(path) {
+	let raw = read(path);
+
+	if (!length(raw))
+		return null;
+
+	try {
+		return json(raw);
+	}
+	catch (e) {
+		return null;
+	}
+}
+
+function zero_counters() {
+	return { up: 0, down: 0, lanUp: 0, lanDown: 0, wanUp: 0, wanDown: 0 };
+}
+
+/* The traffic row keeps its LAN/WAN split nested; the page and the rate maths
+ * both want it flat, and a snapshot file is smaller flat too. */
+function flat_counters(entry) {
+	return {
+		up: entry?.up ?? 0,
+		down: entry?.down ?? 0,
+		lanUp: entry?.lan?.up ?? 0,
+		lanDown: entry?.lan?.down ?? 0,
+		wanUp: entry?.wan?.up ?? 0,
+		wanDown: entry?.wan?.down ?? 0
+	};
+}
+
+/* `acc` is the running total; only the keys that actually moved are touched, so
+ * a device that is idle keeps the total it had. */
+function accumulate(acc, before, cur, dt, rate) {
+	for (let key in rate) {
+		let delta = cur[key] - before[key];
+
+		/* A flow can expire between two passes and take its bytes with it. A
+		 * negative delta is clamped instead of being reported as a spike in
+		 * the opposite direction. */
+		if (delta < 0)
+			delta = 0;
+
+		rate[key] = int((delta / dt) + 0.5);
+		acc[key] = (acc[key] ?? 0) + delta;
+	}
+}
+
+function traffic_derive(data, prev) {
+	let prev_traffic = prev?.traffic ?? {};
+	let prev_totals = prev?.totals ?? {};
+	let dt = data.ts - (int(prev?.ts) ?? 0);
+	let fresh = (dt > 0 && dt <= RATE_MAX_GAP);
+	let rates = {};
+	let totals = {};
+
+	for (let ip, current in data.traffic) {
+		let acc = prev_totals[ip] ?? zero_counters();
+		let rate = zero_counters();
+
+		if (fresh && prev_traffic[ip] != null)
+			accumulate(acc, flat_counters(prev_traffic[ip]), flat_counters(current), dt, rate);
+
+		rates[ip] = rate;
+		totals[ip] = acc;
+	}
+
+	data.rates = rates;
+	data.totals = totals;
+	data.rate_window = fresh ? dt : 0;
+}
+
+/* The bridge ports get the same treatment. On a bridging device this is where
+ * the overview's rates come from: the port counters are hardware and keep
+ * counting through the offload that freezes conntrack at zero. */
+function bridge_derive(data, prev) {
+	if (data.bridge == null)
+		return;
+
+	let prev_ports = prev?.bridge?.ports ?? {};
+	let prev_totals = prev?.bridge?.totals ?? {};
+	let dt = data.ts - (int(prev?.ts) ?? 0);
+	let fresh = (dt > 0 && dt <= RATE_MAX_GAP);
+	let rates = {};
+	let totals = {};
+
+	for (let dev, port in (data.bridge.ports ?? {})) {
+		let acc = prev_totals[dev] ?? { rx: 0, tx: 0 };
+		let rate = { rx: 0, tx: 0 };
+
+		if (fresh && prev_ports[dev] != null)
+			accumulate(acc, { rx: prev_ports[dev].rx ?? 0, tx: prev_ports[dev].tx ?? 0 },
+				{ rx: port.rx ?? 0, tx: port.tx ?? 0 }, dt, rate);
+
+		rates[dev] = rate;
+		totals[dev] = acc;
+	}
+
+	data.bridge.rates = rates;
+	data.bridge.totals = totals;
+}
+
+function file_bytes(path) {
+	try {
+		return fs.stat(path)?.size ?? 0;
+	}
+	catch (e) {
+		return 0;
+	}
+}
+
+/* `history_path` is configurable, so the directory a cache lives in may not
+ * exist yet. Existing is the normal case; a failure here is not reported
+ * because the write that follows says what actually went wrong. */
+function mkdirp(dir) {
+	let parts = split(dir, '/'), current = '';
+
+	for (let part in parts) {
+		if (part == '')
+			continue;
+
+		current += '/' + part;
+
+		try {
+			fs.mkdir(current);
+		}
+		catch (e) {}
+	}
+}
+
+/*
+ * Serialise a document under a hard byte ceiling. `drop` gives up one slice of
+ * rows and answers false when there is nothing left to give up, at which point
+ * the loop stops and what remains is written anyway - a cache that cannot be
+ * made to fit is a bug in its shape, not a reason to fail the pass.
+ *
+ * The drop functions take an eighth of the rows at a time so this converges in
+ * a handful of serialisations rather than one per row.
+ */
+function json_fit(data, max_bytes, drop) {
+	/* A missing, zero or nonsensical ceiling falls back to the built-in one:
+	 * a bounded cache is the point, so no configuration mistake may switch the
+	 * guard off. */
+	if (!(max_bytes > 0))
+		max_bytes = DEFAULT_MAX_BYTES;
+
+	let text = sprintf('%J\n', data);
+	let trimmed = 0;
+
+	while (length(text) > max_bytes) {
+		if (!drop(data))
+			break;
+
+		trimmed++;
+		text = sprintf('%J\n', data);
+	}
+
+	return [ text, trimmed ];
+}
+
+function write_capped(path, data, max_bytes, drop) {
+	let fit = json_fit(data, max_bytes, drop);
+	let text = fit[0];
+	let cut = rindex(path, '/');
+
+	if (cut > 0)
+		mkdirp(substr(path, 0, cut));
+
+	if (fs.writefile(path + '.new', text) != length(text))
+		return null;
+
+	try {
+		fs.chmod(path + '.new', 0600);
+	}
+	catch (e) {}
+
+	if (!fs.rename(path + '.new', path))
+		return null;
+
+	return { path: path, bytes: length(text), trimmed: fit[1] };
+}
+
+/* Keep the busiest `limit` traffic rows. The address the page would rank last
+ * is the one that can go; ties break on the key so the choice is repeatable. */
+function traffic_keep(data, limit) {
+	let traffic = data.traffic ?? {};
+	let names = keys(traffic);
+	let count = length(names);
+
+	if (count <= limit)
+		return false;
+
+	let ranked = [];
+
+	for (let ip in names)
+		push(ranked, [ ip, (traffic[ip]?.up ?? 0) + (traffic[ip]?.down ?? 0) ]);
+
+	sort(ranked, (a, b) => (a[1] - b[1]) || ((a[0] < b[0]) ? -1 : (a[0] > b[0]) ? 1 : 0));
+
+	for (let i = 0; i < count - limit; i++) {
+		let ip = ranked[i][0];
+
+		delete traffic[ip];
+
+		if (data.rates != null)
+			delete data.rates[ip];
+		if (data.totals != null)
+			delete data.totals[ip];
+	}
+
+	return true;
+}
+
+function traffic_drop(data) {
+	let count = 0;
+
+	for (let ip in (data.traffic ?? {}))
+		count++;
+
+	if (count == 0)
+		return false;
+
+	return traffic_keep(data, count - (int(count / 8) + 1));
+}
+
+/* The rest of the document, in the order it is worth losing. Rates go first
+ * because they are the least durable thing in the file - a rate describes one
+ * interval, while an address is a client. Then what the page only uses to
+ * enrich a row (the snooped hints), then the rows themselves, and last the
+ * associated-station table, whose loss makes a client "wired" rather than
+ * hiding it. */
+function list_shrink(list) {
+	let count = length(list ?? []);
+
+	if (count == 0)
+		return false;
+
+	splice(list, 0, int(count / 8) + 1);
+
+	return true;
+}
+
+function map_shrink(map) {
+	let names = keys(map ?? {});
+
+	if (length(names) == 0)
+		return false;
+
+	/* No timestamp to rank by here; taking them in key order makes repeated
+	 * passes make progress, which is all this needs. */
+	for (let i = 0; i <= int(length(names) / 8); i++)
+		delete map[names[i]];
+
+	return true;
+}
+
+function snapshot_drop(data) {
+	if (traffic_drop(data)) return true;
+	if (list_shrink(data.snoop4)) return true;
+	if (list_shrink(data.snoop6)) return true;
+	if (list_shrink(data.arp)) return true;
+	if (list_shrink(data.neigh6)) return true;
+	if (map_shrink(data.names)) return true;
+	if (map_shrink(data.wifi)) return true;
+
+	return false;
+}
+
+function snapshot_write(path, snap, max_bytes) {
+	traffic_keep(snap, MAX_TRAFFIC_ROWS);
+
+	return write_capped(path, snap, max_bytes, snapshot_drop);
+}
+
 /* ---------------- history ---------------- */
 
 function history_empty() {
@@ -1752,41 +2085,35 @@ function history_load(path) {
 	return data;
 }
 
-function mkdirp(dir) {
-	let parts = split(dir, '/'), current = '';
+/* Give up the rows nobody has seen for longest: the retention policy would have
+ * taken them next anyway. */
+function history_drop(data) {
+	let clients = data.clients ?? {};
+	let count = 0;
 
-	for (let part in parts) {
-		if (part == '')
-			continue;
+	for (let mac in clients)
+		count++;
 
-		current += '/' + part;
-
-		try {
-			fs.mkdir(current);
-		}
-		catch (e) {
-			/* Already there, or not ours to create. The write below reports the
-			 * real problem if the directory is still missing. */
-		}
-	}
-}
-
-function history_write(path, data) {
-	let text = sprintf('%J\n', data);
-	let cut = rindex(path, '/');
-
-	if (cut > 0)
-		mkdirp(substr(path, 0, cut));
-
-	if (fs.writefile(path + '.new', text) != length(text))
+	if (count == 0)
 		return false;
 
-	try {
-		fs.chmod(path + '.new', 0600);
-	}
-	catch (e) {}
+	let ranked = [];
 
-	return fs.rename(path + '.new', path) ? true : false;
+	for (let mac, row in clients)
+		push(ranked, [ mac, int(row?.last) ?? 0 ]);
+
+	sort(ranked, (a, b) => a[1] - b[1]);
+
+	let remove = int(count / 8) + 1;
+
+	for (let i = 0; i < remove && i < length(ranked); i++)
+		delete clients[ranked[i][0]];
+
+	return true;
+}
+
+function history_write(path, data, max_bytes) {
+	return write_capped(path, data, max_bytes ?? DEFAULT_MAX_BYTES, history_drop);
 }
 
 /*
@@ -1799,11 +2126,12 @@ function history_write(path, data) {
  * link-layer address for it, or the radio lists it as associated. A row that is
  * neither is kept with online=false until retention drops it.
  */
-function history_merge(path, snap, retention) {
+function history_merge(path, snap, retention, max_bytes) {
 	let data = history_load(path);
 	let now = snap.ts;
 	let seen = {};
 	let changed = false;
+	let written = null;
 
 	function touch(mac, patch) {
 		if (!mac)
@@ -1904,7 +2232,9 @@ function history_merge(path, snap, retention) {
 		data.version = 1;
 		data.updated = now;
 
-		if (!history_write(path, data))
+		written = history_write(path, data, max_bytes);
+
+		if (written == null)
 			return { ok: false, error: 'cannot write ' + path };
 	}
 
@@ -1913,7 +2243,15 @@ function history_merge(path, snap, retention) {
 	for (let mac in data.clients)
 		rows++;
 
-	return { ok: true, path: path, rows: rows, updated: data.updated, written: changed };
+	return {
+		ok: true,
+		path: path,
+		rows: rows,
+		updated: data.updated,
+		written: changed,
+		bytes: written ? written.bytes : file_bytes(path),
+		trimmed: written ? written.trimmed : 0
+	};
 }
 
 function history_status(path) {
@@ -1937,23 +2275,70 @@ function history_status(path) {
 	};
 }
 
+/* What the caches actually cost, so the caps can be checked from the outside
+ * instead of trusted. */
+function file_report(paths, max_bytes) {
+	let files = [];
+	let total = 0;
+
+	for (let path in paths) {
+		let bytes = file_bytes(path);
+
+		total += bytes;
+		push(files, { path: path, bytes: bytes, over: (max_bytes > 0 && bytes > max_bytes) });
+	}
+
+	return { files: files, total_bytes: total, max_bytes: max_bytes };
+}
+
 /* ---------------- main ---------------- */
 
 /*
- * The retention and the path come from the caller rather than from UCI: the
- * collector script owns the schedule and the page only reads the result, so
- * keeping the config in one place avoids two sources of truth for the same
- * file.
+ * The retention, the cadence and both paths come from the caller rather than
+ * from UCI: the collector script owns the schedule and the page only reads the
+ * result, so keeping the config in one place avoids two sources of truth for
+ * the same file.
  */
 if (length(ARGV)) {
 	let cmd = ARGV[0];
 	let path = ARGV[1] ?? DEFAULT_HISTORY;
 	let result;
 
-	if (cmd == 'collect')
-		/* false: the collector runs whether or not anyone looks at the page,
-		 * and PTR resolution must follow the viewer, not the clock. */
-		result = history_merge(path, snapshot(false), int(ARGV[2]) ?? 7);
+	if (cmd == 'collect') {
+		let retention = number_arg(ARGV[2], 7);
+		let every = number_arg(ARGV[3], 30);
+		let cache = ARGV[4] ?? DEFAULT_SNAPSHOT;
+		let max_bytes = number_arg(ARGV[5], DEFAULT_MAX_BYTES);
+		let snap = snapshot(false);
+		let prev = cache_load(cache);
+
+		/* PTR resolution stays with the viewer: an AP must not ask the network
+		 * for names on a timer, and a routed box only pays for it while
+		 * somebody is looking. */
+		traffic_derive(snap, prev);
+		bridge_derive(snap, prev);
+
+		/* The archive is merged on its own, slower clock and rides on the
+		 * snapshot already in hand - walking conntrack is what costs, so the
+		 * two cadences share one walk instead of each paying for their own. */
+		let hist_ts = int(prev?.hist_ts) ?? 0;
+		let due = (prev == null) || (snap.ts - hist_ts >= every) || (snap.ts < hist_ts);
+
+		snap.hist_ts = due ? snap.ts : hist_ts;
+
+		/* The archive is merged before the live file is trimmed: what the page
+		 * can afford to forget under a byte ceiling is a different question
+		 * from what the history should record, and the trimmer mutates the
+		 * snapshot in place. */
+		let hist = due ? history_merge(path, snap, retention, max_bytes) : null;
+		let live = snapshot_write(cache, snap, max_bytes);
+
+		result = {
+			ok: (live != null) && (hist == null || hist.ok != false),
+			snapshot: live,
+			history: hist
+		};
+	}
 	else if (cmd == 'read')
 		result = history_load(path);
 	else if (cmd == 'nlbw') {
@@ -1973,13 +2358,18 @@ if (length(ARGV)) {
 		};
 	}
 	else if (cmd == 'clear')
-		result = history_write(path, history_empty())
+		result = history_write(path, history_empty(), DEFAULT_MAX_BYTES)
 			? { ok: true, cleared: true }
 			: { ok: false, error: 'cannot write ' + path };
-	else if (cmd == 'status')
+	else if (cmd == 'status') {
+		let cache = ARGV[2] ?? DEFAULT_SNAPSHOT;
+		let max_bytes = number_arg(ARGV[3], DEFAULT_MAX_BYTES);
+
 		result = history_status(path);
+		result.cache = file_report([ path, cache, SNOOP_FILE, PTR_CACHE, DNS_FILE ], max_bytes);
+	}
 	else
-		result = { ok: false, error: 'usage: clients-probe [collect|read|clear|status|nlbw] [path|period] [retention_days]' };
+		result = { ok: false, error: 'usage: clients-probe [collect|read|clear|status|nlbw] [path|period] [retention_days] [every] [snapshot] [max_bytes]' };
 
 	print(sprintf('%J\n', result));
 	exit((result.ok == false) ? 1 : 0);

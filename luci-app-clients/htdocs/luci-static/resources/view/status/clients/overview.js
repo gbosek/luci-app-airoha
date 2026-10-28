@@ -636,8 +636,8 @@ return L.Class.extend({
 			this.chart,
 			E('p', { 'class': 'clients-note' },
 				bridgeMode
-					? _('This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port. The bracketed figures accumulate while this view is open.')
-					: _('Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are what this view has seen while it was open - conntrack counters belong to a flow, so they are a floor, not a lifetime total.'))
+					? _('This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port. The bracketed figures are counted by the background collector since it started.')
+					: _('Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are counted by the background collector since it started - conntrack counters belong to a flow, so they are a floor, not a lifetime total.'))
 		])
 	]);
 	}

@@ -31,8 +31,8 @@ not installed.
 
 ## Where the data comes from
 
-Two collectors run on a timer and write to `/tmp`. The pages read those files
-and the live probe; nothing here polls a daemon over a socket.
+Two collectors run on a timer and write to `/tmp`. The pages read those files;
+nothing here starts a measurement, and nothing polls a daemon over a socket.
 
 | Source | Provides | Written by |
 |---|---|---|
@@ -40,12 +40,21 @@ and the live probe; nothing here polls a daemon over a socket.
 | ARP + IPv6 neighbour cache | who is reachable now, address family | `clients-probe` |
 | `iwinfo` assoclist | SSID, band, signal, noise | `clients-probe` |
 | bridge snooping | IPv4 assignment evidence, IPv6 addresses learned from neighbour discovery | `clients-snoop`, long-running |
+| live snapshot | everything above, with the counters already turned into rates and running totals | `clients-probe collect`, every 10 s |
 | archive | first / last seen, last known association and name | `clients-probe collect`, every 30 s |
 | dnsmasq query log | DNS records with response time and result | `clients-dns collect`, every 10 s |
 
-`clients-probe` with no argument prints a live snapshot and exits; the page
-samples it and differentiates the cumulative counters itself, because it already
-knows the wall-clock distance between two of its own samples.
+The sampling clock belongs to the collector, not to the browser: every pass
+walks conntrack once and writes `/tmp/clients-snapshot.json`, with `rates`,
+`totals` and the `rate_window` they were divided by. Opening the page reads
+that file, so a second tab costs nothing and a viewer never waits for a sample.
+`clients-probe` with no argument still prints a live snapshot and exits, and the
+page falls back to it - differencing the counters locally - when the file is
+missing because the service is stopped.
+
+The archive merge rides on the same pass but on a slower clock
+(`clients.global.interval`), and the stamp that decides it lives in the live
+file, so the loop needs no other state.
 
 ## Bridging device (AP mode)
 
@@ -104,9 +113,10 @@ nlbw` query path is still present on the backend but nothing calls it.
 
 ## Two limits worth knowing
 
-1. **The live subtotals are floors, not lifetime totals.** conntrack counters
+1. **The running totals are floors, not lifetime totals.** conntrack counters
    belong to a flow; when the flow is reaped, its bytes leave the table with it.
-   The rate is accurate, the accumulated figure is "what this view saw".
+   The rate is accurate, the accumulated figure is "what the collector has seen
+   since it started" - it survives a page reload, not a reboot.
 2. **DNS records live in memory.** They survive a page reload but not a reboot.
    Logging every query costs a little CPU on a busy resolver. The package turns
    `log-queries` on at install time; `clients.dns.enabled=0` stops the collector
@@ -122,12 +132,31 @@ nlbw` query path is still present on the backend but nothing calls it.
 | `clients.global.interval` | `30` | seconds between host samples |
 | `clients.global.retention` | `7` | days an offline client is kept |
 | `clients.global.history_path` | `/tmp/clients-history.json` | archive location |
+| `clients.global.live_interval` | `10` | seconds between live snapshot passes |
+| `clients.global.snapshot_path` | `/tmp/clients-snapshot.json` | location the pages read |
+| `clients.global.max_bytes` | `262144` | byte ceiling per cache file |
 | `clients.dns.enabled` | `1` | DNS collector on/off |
 | `clients.dns.interval` | `10` | seconds between log passes |
+| `clients.snoop.enabled` | `1` | passive bridge listening on/off |
 
-Both archives default to `/tmp` deliberately: a status page must not wear the
+Every cache defaults to `/tmp` deliberately: a status page must not wear the
 flash. Point them at persistent storage only if the history has to survive a
 reboot - and update `acl.d/luci-app-clients.json` to match the new paths.
+
+## Space used in /tmp
+
+`/tmp` is RAM, so the five files this package keeps there are all capped:
+`clients-history.json`, `clients-snapshot.json`, `clients-dns.json`,
+`clients-snoop.json` and `clients-ptr.json`. A document that would exceed
+`max_bytes` gives up rows before it is written - rates first, then the snooped
+hints, then whole client rows, the archive's oldest entries, and the DNS
+archive's oldest records - so the worst case is `max_bytes` per file instead of
+a function of how many addresses the network handed out. The default of 256 KiB
+is several times what a /24 of real clients needs; a `/24` under normal use
+costs about 210 KiB in total.
+
+`clients-probe status` prints the size of each file and whether any of them is
+over the ceiling, which is the cheapest way to check the cap from the outside.
 
 ## A note on dnsmasq
 
