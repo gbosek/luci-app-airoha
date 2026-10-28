@@ -201,10 +201,10 @@ msgid "Last 25 minutes"
 msgstr "最近 25 分钟"
 
 msgid "Upload rate"
-msgstr "上行速率"
+msgstr "上传速率"
 
 msgid "Download rate"
-msgstr "下行速率"
+msgstr "下载速率"
 
 msgid "Traffic trend"
 msgstr "流量趋势"
@@ -319,3 +319,6 @@ msgstr "本设备工作在桥接模式，流量取自硬件端口计数器：广
 
 msgid "Live rate"
 msgstr "实时速率"
+
+msgid "Total traffic"
+msgstr "总流量"

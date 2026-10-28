@@ -887,6 +887,15 @@ function sortValue(entry, key) {
 	case 'wan':
 		return entry.rate ? (entry.rate.wanUp + entry.rate.wanDown) : null;
 
+	case 'up':
+		return entry.rate ? entry.rate.wanUp : null;
+
+	case 'down':
+		return entry.rate ? entry.rate.wanDown : null;
+
+	case 'total':
+		return entry.total ? (entry.total.wanUp + entry.total.wanDown) : null;
+
 	case 'conns':
 		return (entry.conns == null) ? null : entry.conns;
 

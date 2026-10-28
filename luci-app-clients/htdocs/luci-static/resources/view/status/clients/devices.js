@@ -7,12 +7,13 @@
 'require view.status.clients.common as common';
 
 /*
- * Devices - one row per client, with its WAN traffic and connection count.
+ * Devices - one row per client, with its upload/download rate, session total
+ * traffic and connection count.
  *
  * "This phone used 300 MB" says nothing about whether it went to the internet
  * (which costs upstream bandwidth) or stayed inside the LAN (which does not);
- * the WAN column answers the question that matters. The probe still computes
- * the LAN half of every flow, but the table no longer shows it.
+ * the upload/download columns answer the question that matters. The probe still
+ * computes the LAN half of every flow, but the table no longer shows it.
  *
  * Totals are session totals. conntrack accounting belongs to the flow, so when
  * a flow is reaped its byte count leaves this table with it - there is no
@@ -30,7 +31,7 @@
  * plain class is inert on require(); clients.js mounts it into its pane.
  */
 
-var SORT_KEYS = [ 'state', 'hostname', 'ipv4', 'ipv6', 'mac', 'network', 'signal', 'wan', 'conns', 'last' ];
+var SORT_KEYS = [ 'state', 'hostname', 'ipv4', 'ipv6', 'mac', 'network', 'signal', 'up', 'down', 'total', 'conns', 'last' ];
 var SORT_STORAGE = 'clients.devices.sort';
 var WIDTH_STORAGE = 'clients.devices.widths';
 
@@ -192,42 +193,42 @@ return L.Class.extend({
 		]);
 	},
 
-	/*
-	 * One scope's traffic: the rate on top, the session total underneath, both
-	 * with the direction arrows the carrier pages use. The total is deliberately
-	 * quiet - it is a floor, not a lifetime figure, and giving it the same
-	 * weight as the rate would invite the wrong reading.
-	 */
-	trafficCell: function(entry, scope) {
-		if (!entry || !entry.rate)
+	/* A device is worth showing traffic for while it has any live rate or any
+	 * accumulated total; below that every per-direction cell reads '-' rather
+	 * than a column of meaningless "0 B/s". */
+	hasAnyTraffic: function(entry) {
+		if (!entry || !entry.rate || !entry.total)
+			return false;
+
+		return !!(entry.rate.wanUp || entry.rate.wanDown || entry.total.wanUp || entry.total.wanDown);
+	},
+
+	/* One direction of the live rate. The column header ("Upload rate" /
+	 * "Download rate") already names the direction, so the cell carries only
+	 * the value - no arrow - and stays a single short number. */
+	rateCell: function(entry, dir) {
+		if (!this.hasAnyTraffic(entry))
 			return E('span', { 'class': 'clients__muted' }, '-');
 
-		var rateUp = entry.rate[scope + 'Up'] || 0;
-		var rateDown = entry.rate[scope + 'Down'] || 0;
-		var totalUp = entry.total[scope + 'Up'] || 0;
-		var totalDown = entry.total[scope + 'Down'] || 0;
+		return E('div', { 'class': 'clients__traffic-rate' }, [
+			E('span', { 'class': 'clients__traffic-' + dir.toLowerCase() },
+				common.formatRate(entry.rate['wan' + dir] || 0))
+		]);
+	},
 
-		if (!rateUp && !rateDown && !totalUp && !totalDown)
+	/* The session total keeps both directions in one cell, arrows included:
+	 * it is deliberately quiet - a floor, not a lifetime figure - so giving it
+	 * the same weight as the rates would invite the wrong reading. */
+	totalCell: function(entry) {
+		if (!this.hasAnyTraffic(entry))
 			return E('span', { 'class': 'clients__muted' }, '-');
 
-		return E('div', { 'class': 'clients__traffic' }, [
-			E('div', { 'class': 'clients__traffic-rate' }, [
-				E('span', { 'class': 'clients__traffic-up' }, [
-					E('span', { 'class': 'clients__dir', 'aria-hidden': 'true' }, '↑'), ' ',
-					common.formatRate(rateUp)
-				]),
-				E('span', { 'class': 'clients__traffic-down' }, [
-					E('span', { 'class': 'clients__dir', 'aria-hidden': 'true' }, '↓'), ' ',
-					common.formatRate(rateDown)
-				])
-			]),
-			E('div', {
-				'class': 'clients__traffic-total',
-				'title': _('Traffic seen while this view was open. conntrack counters belong to a flow, so the figure is a floor, not a lifetime total.')
-			}, [
-				E('span', {}, '↑ ' + common.formatSize(totalUp)),
-				E('span', {}, '↓ ' + common.formatSize(totalDown))
-			])
+		return E('div', {
+			'class': 'clients__traffic-total',
+			'title': _('Traffic seen while this view was open. conntrack counters belong to a flow, so the figure is a floor, not a lifetime total.')
+		}, [
+			E('span', {}, '↑ ' + common.formatSize(entry.total.wanUp || 0)),
+			E('span', {}, '↓ ' + common.formatSize(entry.total.wanDown || 0))
 		]);
 	},
 
@@ -244,7 +245,9 @@ return L.Class.extend({
 			E('td', { 'class': 'clients__addr' }, entry.mac || '-'),
 			E('td', {}, this.networkCell(entry)),
 			this.hasWifi ? E('td', {}, this.signalCell(entry)) : null,
-			E('td', { 'class': 'clients__ctr' }, this.trafficCell(entry, 'wan')),
+			E('td', { 'class': 'clients__ctr' }, this.rateCell(entry, 'Up')),
+			E('td', { 'class': 'clients__ctr' }, this.rateCell(entry, 'Down')),
+			E('td', { 'class': 'clients__ctr' }, this.totalCell(entry)),
 			E('td', { 'class': 'clients__ctr' }, common.formatCount(entry.conns)),
 			E('td', { 'class': 'clients__seen', 'title': common.absoluteTime(entry.last) }, [
 				E('div', { 'class': 'clients__seen-last' }, seen),
@@ -287,9 +290,9 @@ return L.Class.extend({
 	 * widest IPv6 hextet and pushes the counters out of the card; the drag
 	 * handles let a viewer override each width, and the choice persists. */
 	DEFAULT_WIDTHS_FULL: [ '3rem', '7.5rem', '7.5rem', '9.5rem', '9rem', '7.5rem',
-		'4.75rem', '7.5rem', '5rem', '6.5rem' ],
+		'4.75rem', '5.5rem', '5.5rem', '7.5rem', '5rem', '6.5rem' ],
 	DEFAULT_WIDTHS_NOWIFI: [ '3rem', '7.5rem', '7.5rem', '9.5rem', '9rem', '7.5rem',
-		'7.5rem', '5rem', '6.5rem' ],
+		'5.5rem', '5.5rem', '7.5rem', '5rem', '6.5rem' ],
 
 	restoreWidths: function() {
 		var defaults = this.hasWifi ? this.DEFAULT_WIDTHS_FULL : this.DEFAULT_WIDTHS_NOWIFI;
@@ -378,11 +381,13 @@ return L.Class.extend({
 			head.push(this.headerCell(_('Signal'), 'signal'));
 
 			head.push(
-				/* The rate column keeps the arrow suffix: the caption names what
-				 * moves, the arrows name which line is which. Connections is a
-				 * single short number per row - centring header and value makes
-				 * the pairing obvious without a ruler. */
-				this.headerCell(_('Live rate') + ' (↑ / ↓)', 'wan', 'clients__ctr'),
+				/* Upload and download are separate columns, so each header names
+				 * one direction and its cell is a bare number. Total keeps both
+				 * arrows because it stacks ↑ and ↓ in one cell. All four
+				 * counters are centred so each header sits over its value. */
+				this.headerCell(_('Upload rate'), 'up', 'clients__ctr'),
+				this.headerCell(_('Download rate'), 'down', 'clients__ctr'),
+				this.headerCell(_('Total traffic') + ' (↑ / ↓)', 'total', 'clients__ctr'),
 				this.headerCell(_('Connections'), 'conns', 'clients__ctr'),
 				this.headerCell(_('Last seen'), 'last')
 			);

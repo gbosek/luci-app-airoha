@@ -321,3 +321,6 @@ msgstr ""
 
 msgid "Live rate"
 msgstr ""
+
+msgid "Total traffic"
+msgstr ""
