@@ -32,9 +32,16 @@
  *                 "members": [ "wan", "lan2" ],
  *                 "ports": { "wan": { "rx": 4926429178, "tx": 4101720363 },
  *                            "lan2": { "rx": 7101134, "tx": 13992952 } } },
+ *     "nlbw_used": false,
  *     "snoop4": [ { "mac": "8E:5F:E7:18:85:E3", "ip": "10.10.20.93" } ],
  *     "snoop6": [ { "mac": "E8:68:B1:36:F4:75", "ip": "2408:...", "fresh": true } ]
  *   }
+ *
+ * `nlbw_used` is true when at least one host's traffic had to be taken from
+ * nlbwmon because hardware flow offload had zeroed its conntrack byte counters.
+ * nlbwmon reads the same driver accounting conntrack does, so the figures stay
+ * correct for offloaded flows; on a box without it (or without offload) the
+ * conntrack bytes are used unchanged and the flag stays false.
  *
  * `names` maps MAC -> hostname from the lease file, the luci-rpc hints and
  * the DHCP Host-Name option heard on the bridge, in that priority. On a
@@ -1071,6 +1078,144 @@ function nlbw_usage(period) {
 }
 
 /*
+ * Fold nlbwmon's per-MAC byte counters into the conntrack-driven traffic map.
+ *
+ * Some platforms hardware-offload flows (the `[HW_OFFLOAD]` tag in
+ * /proc/net/nf_conntrack) and the offload driver does NOT write the byte
+ * counters back into the conntrack entry - every offloaded flow reads
+ * bytes=0, so a routed box that leans on the offload shows a "Clients" table
+ * where every host has zero traffic. nlbwmon listens on the same conntrack
+ * netlink socket the driver reports into, so it still accumulates the bytes
+ * (and the flow count) for those offloaded streams.
+ *
+ * The merge is keyed through the address-to-MAC tables already built for the
+ * PTR pass, so the page's existing rate/total differentiation needs no change:
+ * nlbwmon's rx_bytes is what the client received (download), tx_bytes what it
+ * sent (upload), and both go into the WAN bucket because nlbwmon groups by MAC
+ * alone and cannot tell LAN from WAN. The LAN half is left at zero; Total
+ * still adds up to the WAN figure, which for an internet client is the number
+ * that matters.
+ *
+ * Where conntrack byte accounting is already non-zero (no offload, or a
+ * bridging AP whose port counters already cover it) this is a no-op, so the
+ * original path is left untouched and the LAN/WAN split it computes survives.
+ */
+function nlbw_into_traffic(hosts, ipMac) {
+	if (!nlbw_available())
+		return false;
+
+	/*
+	 * A box with hardware offload is a mix, not an all-or-nothing: some flows
+	 * are tracked (conntrack bytes intact) and some are offloaded (bytes=0,
+	 * entry still present). So the decision is per-host - fill a host's bytes
+	 * from nlbwmon only when its own conntrack bytes are zero - rather than a
+	 * global "all conntrack zero" gate that would miss exactly the offloaded
+	 * hosts this exists to rescue (on 30.1 ~1252 of ~1700 entries read
+	 * bytes=0 while the rest still count).
+	 */
+	let usage = nlbw_usage(null);
+
+	if (usage == null)
+		return false;
+
+	/* A single client MAC answers on several addresses - an IPv4 lease and
+	 * the EUI-64 IPv6 derived from the same MAC are the common case. The
+	 * reverse map must therefore be MAC -> [all its IPs], not MAC -> one IP,
+	 * or only the last address would inherit the nlbwmon bytes and the IPv4
+	 * (or IPv6) sibling would stay at zero. */
+	let mac_ips = {};
+
+	for (let ip in ipMac)
+		if (ipMac[ip]) {
+			let m = ipMac[ip];
+
+			if (mac_ips[m] == null)
+				mac_ips[m] = [];
+
+			push(mac_ips[m], ip);
+		}
+
+	let used = false;
+
+	for (let key, entry in usage) {
+		let ips = mac_ips[key];
+
+		if (ips == null)
+			continue;
+
+		let conntrack_total = 0;
+
+		for (let ip in ips)
+			conntrack_total += (hosts[ip]?.up || 0) + (hosts[ip]?.down || 0);
+
+		let nlbw_total = (entry.up || 0) + (entry.down || 0);
+
+		/* nlbwmon accumulates the same driver accounting conntrack reads, so
+		 * it is always a superset - it never loses flows that opened and
+		 * closed between two /proc snapshots. Use it only when conntrack is
+		 * clearly missing the device (zero bytes, or a sliver next to
+		 * nlbwmon's total, which is what a few non-offloaded flows leave
+		 * behind on an otherwise offloaded host). Otherwise keep conntrack,
+		 * which still carries the LAN/WAN split. */
+		if (nlbw_total <= 0 || nlbw_total <= conntrack_total * 2)
+			continue;
+
+		/* The device is offloaded. Carry nlbwmon's MAC-wide total on a single
+		 * address - preferring IPv4 so the WAN figure lands beside the
+		 * connection count - and leave the other addresses at their (zero)
+		 * conntrack counters. The page then sums exactly one copy instead of
+		 * multiplying the same total over every address of a dual-stack host. */
+		let rep = null;
+
+		for (let ip in ips)
+			if (index(ip, ':') < 0) {
+				rep = ip;
+				break;
+			}
+
+		if (rep == null)
+			rep = ips[0];
+
+		let h = hosts[rep];
+
+		if (h == null) {
+			h = {
+				up: 0, down: 0, conns: 0,
+				lan: { up: 0, down: 0, conns: 0 },
+				wan: { up: 0, down: 0, conns: 0 }
+			};
+			hosts[rep] = h;
+		}
+
+		/* rx_bytes = client received = download; tx_bytes = client sent =
+		 * upload. Verified against a live device. The LAN/WAN split is gone
+		 * (nlbwmon groups by MAC alone) so both bytes go to WAN; LAN stays
+		 * zero. Connections keep coming from conntrack - the concurrent-flow
+		 * count, matching the 20.1 reference - so nlbwmon's lifetime conn
+		 * count is only used when conntrack recorded nothing for this
+		 * address. */
+		h.up = entry.up;
+		h.down = entry.down;
+		h.wan.up = entry.up;
+		h.wan.down = entry.down;
+		h.lan.up = 0;
+		h.lan.down = 0;
+
+		/* conntrack under-reports a device whose flows are offloaded - their
+		 * entries drop out - so its concurrent count is tiny right where the
+		 * bytes are. Since nlbwmon is already authoritative for this device's
+		 * traffic, take its connection count too, so the bytes and the
+		 * connection column agree on which source described the device. */
+		if (entry.conns)
+			h.conns = entry.conns;
+
+		used = true;
+	}
+
+	return used;
+}
+
+/*
  * The accounting periods nlbwmon has on disk, oldest first. The configured
  * interval decides what a period means - the package default starts a new one
  * on the first of every month, which is what the page labels it as.
@@ -1482,9 +1627,18 @@ function snapshot(withPtr) {
 		if (ipMac[entry.ip] == null)
 			ipMac[entry.ip] = entry.mac;
 
-	for (let entry in snoop?.snoop4 ?? [])
+	for (let entry in (snoop?.snoop4 ?? []))
 		if (ipMac[entry.ip] == null)
 			ipMac[entry.ip] = entry.mac;
+
+	for (let entry in (snoop?.snoop6 ?? []))
+		if (ipMac[entry.ip] == null)
+			ipMac[entry.ip] = entry.mac;
+
+	/* Where the offload has zeroed conntrack's byte counters, replace them with
+	 * nlbwmon's offload-safe per-MAC bytes so the page shows real traffic. No
+	 * nlbwmon, or conntrack already counting, leaves this a no-op. */
+	let nlbw_used = nlbw_into_traffic(hosts, ipMac);
 
 	let candidates = [];
 
@@ -1562,6 +1716,7 @@ function snapshot(withPtr) {
 			members: bridge.members,
 			ports: bridge.ports
 		},
+		nlbw_used: nlbw_used,
 		snoop4: snoop?.snoop4 ?? [],
 		snoop6: snoop?.snoop6 ?? []
 	};
