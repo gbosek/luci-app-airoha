@@ -46,8 +46,13 @@ nothing here starts a measurement, and nothing polls a daemon over a socket.
 
 The sampling clock belongs to the collector, not to the browser: every pass
 walks conntrack once and writes `/tmp/clients-snapshot.json`, with `rates`,
-`totals` and the `rate_window` they were divided by. Opening the page reads
-that file, so a second tab costs nothing and a viewer never waits for a sample.
+`totals` and the `rate_window` they were divided by, plus one `trend` point
+(the summed LAN/WAN rates and, on a routed box, the busiest eight devices). The
+series holds 180 points - 30 minutes at the default cadence, enough for the
+widest window the page offers - so the chart is already drawn from history when
+the page opens instead of filling in from the moment someone looks. Opening the
+page reads that file, so a second tab costs nothing and a viewer never waits for
+a sample.
 `clients-probe` with no argument still prints a live snapshot and exits, and the
 page falls back to it - differencing the counters locally - when the file is
 missing because the service is stopped.
@@ -154,6 +159,11 @@ archive's oldest records - so the worst case is `max_bytes` per file instead of
 a function of how many addresses the network handed out. The default of 256 KiB
 is several times what a /24 of real clients needs; a `/24` under normal use
 costs about 210 KiB in total.
+
+The trend series is the largest single item in the snapshot - about 75 KiB with
+eight devices and a full 180 points on a routed box, and about 14 KiB on a
+bridge, where there is no per-device series. Under byte pressure it goes last:
+first the per-device table is dropped, then the oldest points.
 
 `clients-probe status` prints the size of each file and whether any of them is
 over the ceiling, which is the cheapest way to check the cap from the outside.

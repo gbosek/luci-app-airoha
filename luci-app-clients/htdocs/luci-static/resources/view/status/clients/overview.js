@@ -13,10 +13,12 @@
  * A router image has no room for one, and the shape needed here is two lines
  * with a shared axis: a library would add more code than the drawing does.
  *
- * The series lives in memory. Points accumulate every SAMPLE_INTERVAL while the
- * page is open and are dropped when it closes, because a few minutes of history
- * is not worth writing to a file - and writing it to flash on a timer is
- * exactly what a status page should not do.
+ * The series comes from the collector, in the snapshot the page already reads:
+ * one point per sampling pass, kept in /tmp so it survives a page reload and is
+ * already there when the page opens. It used to be built here, which meant the
+ * chart started at "whenever this page was opened" and a reload threw the
+ * history away. Only the fallback path - no cache, collector stopped - still
+ * accumulates points in memory while the page is open.
  *
  * The totals come from conntrack, so they are floors rather than lifetime
  * figures. The footnote under the chart says that once instead of repeating it
@@ -260,7 +262,15 @@ return L.Class.extend({
 
 	visiblePoints: function() {
 		var trend = this.store.trend || [];
-		var cutoff = Date.now() - this.windowMinutes * 60000;
+
+		if (!trend.length)
+			return [];
+
+		/* The window is measured back from the newest sample, not from this
+		 * browser's clock: the points are stamped by the router, and a box
+		 * without a battery-backed clock is not always right about the time -
+		 * a skewed router would otherwise empty the chart. */
+		var cutoff = trend[trend.length - 1].t - this.windowMinutes * 60000;
 
 		return trend.filter(function(point) { return point.t >= cutoff; });
 	},
@@ -282,7 +292,7 @@ return L.Class.extend({
 		if (!points.length) {
 			dom.content(this.chart, [
 				E('div', { 'class': 'clients-chart__empty' },
-					_('Collecting samples. The chart fills in as the page stays open.'))
+					_('No samples yet. The chart appears as soon as the background collector records one.'))
 			]);
 			return;
 		}

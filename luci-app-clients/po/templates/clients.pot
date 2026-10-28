@@ -213,7 +213,7 @@ msgstr ""
 msgid "Upload and download rates over the selected window."
 msgstr ""
 
-msgid "Collecting samples. The chart fills in as the page stays open."
+msgid "No samples yet. The chart appears as soon as the background collector records one."
 msgstr ""
 
 msgid "Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are counted by the background collector since it started - conntrack counters belong to a flow, so they are a floor, not a lifetime total."

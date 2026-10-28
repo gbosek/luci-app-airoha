@@ -19,10 +19,11 @@
  * The snapshot carries what the probe knows - ARP and the IPv6 neighbour cache
  * (who is reachable now), nf_conntrack byte counters and iwinfo assoclists
  * (which AP, SSID, signal) - with the cumulative counters already
- * differentiated into rates and running totals by the collector that wrote it.
- * That is the point of the file: the sampling clock belongs to the background
- * loop, so opening this page reads one document instead of starting a
- * measurement, and a second viewer costs nothing at all.
+ * differentiated into rates and running totals by the collector that wrote it,
+ * plus one trend point per pass so the chart has history before anyone looks at
+ * it. That is the point of the file: the sampling clock belongs to the
+ * background loop, so opening this page reads one document instead of starting
+ * a measurement, and a second viewer costs nothing at all.
  *
  * When the file is missing - the service is stopped, or an older probe is
  * installed - the page falls back to asking the probe directly and doing the
@@ -930,6 +931,38 @@ function sortValue(entry, key) {
  */
 /* ---------------- counters ---------------- */
 
+/*
+ * One point of the trend series as the collector stores it. The per-device
+ * table is written as flat arrays - the MAC would otherwise be repeated for
+ * every point it appears in - so it is widened back into the objects the chart
+ * already reads.
+ */
+function decodeTrendPoint(point) {
+	var decoded = {
+		t: Number(point.t) || 0,
+		valid: point.valid !== false,
+		lanUp: point.lanUp || 0,
+		lanDown: point.lanDown || 0,
+		wanUp: point.wanUp || 0,
+		wanDown: point.wanDown || 0,
+		byMac: Object.create(null)
+	};
+
+	var macs = point.macs || {};
+
+	Object.keys(macs).forEach(function(mac) {
+		var v = macs[mac] || [];
+
+		decoded.byMac[mac] = {
+			up: v[0] || 0, down: v[1] || 0,
+			lanUp: v[2] || 0, lanDown: v[3] || 0,
+			wanUp: v[4] || 0, wanDown: v[5] || 0
+		};
+	});
+
+	return decoded;
+}
+
 function zeroCounters() {
 	return { up: 0, down: 0, lanUp: 0, lanDown: 0, wanUp: 0, wanDown: 0 };
 }
@@ -968,6 +1001,9 @@ function createStore() {
 		archive: {},
 		archiveUpdated: 0,
 		trend: null,
+		/* True while the trend series comes from the collector's file rather
+		 * than from points this page built. */
+		trendFromFile: false,
 		/* False until a snapshot carried a real measurement window. The first
 		 * rate of a session is unknown, not zero - marking the point lets the
 		 * trend chart break the line there instead of drawing the fake rise
@@ -1068,6 +1104,14 @@ function createStore() {
 			else {
 				self.differentiate(data, ts * 1000);
 			}
+
+			/* The chart's history, if the collector kept one. An empty series
+			 * (first pass after the collector started) falls back to building
+			 * points here, so the chart is never blank while data exists. */
+			self.trendFromFile = Array.isArray(data.trend) && data.trend.length > 0;
+
+			if (self.trendFromFile)
+				self.trend = data.trend.map(decodeTrendPoint);
 
 			self.state.interfaces = data.interfaces || [];
 			self.state.arp = data.arp || [];
@@ -1284,6 +1328,12 @@ function createStore() {
 		pushTrend: function(clients) {
 			if (!this.trend)
 				this.trend = [];
+
+			/* The collector owns the series when the snapshot carries one;
+			 * appending here would stack this page's points on top of the same
+			 * measurements. */
+			if (this.trendFromFile)
+				return this.trend.length ? this.trend[this.trend.length - 1] : null;
 
 			/* Two polls can land inside one collector pass. That is one
 			 * measurement, so it is one point - the previous one is still the

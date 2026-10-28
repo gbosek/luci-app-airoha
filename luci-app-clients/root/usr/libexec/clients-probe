@@ -68,8 +68,11 @@
  * cumulative counters already differentiated against the previous pass: `rates`
  * and `totals` per address, `rates` and `totals` per bridge port, plus
  * `rate_window`, the length of the interval they were divided by (0 when there
- * was no usable baseline). Opening the page then reads one file - no conntrack
- * walk per viewer, and two tabs cost exactly as much as one. `every` decouples
+ * was no usable baseline). It also appends one `trend` point per pass - the
+ * summed LAN/WAN rates, and the per-device series for the busiest few MACs - so
+ * the chart has history before anyone opens the page instead of starting to
+ * fill in from the moment it is looked at. Opening the page then reads one
+ * file: no conntrack walk per viewer, and two tabs cost exactly as much as one. `every` decouples
  * the archive merge from that cadence: the live file is rewritten on every
  * pass, the history only when it is due, and the stamp that decides it is kept
  * in the live file so the loop carries no state of its own.
@@ -116,6 +119,15 @@ const DEFAULT_MAX_BYTES = 262144;
  * than this on every device that runs the page; the bound exists so that a
  * stale row cannot outlive the flow that created it. */
 const MAX_TRAFFIC_ROWS = 1024;
+
+/* Points kept in the trend series - the widest window the page offers is 25
+ * minutes, so at the default 10 s cadence 180 points cover it with margin. */
+const TREND_POINTS = 180;
+
+/* Per-device series are kept for the busiest few only. A chart of one device is
+ * a convenience; an unbounded MAC -> 180 samples table would dwarf the snapshot
+ * it lives in. */
+const TREND_MACS = 8;
 
 /* A rate is only meaningful across a short window. If the collector was
  * stopped, suspended or simply ran late, the counters moved but the interval
@@ -1639,6 +1651,29 @@ function ptr_names(names, ipMac, candidates, local) {
 		ptr_cache_save(cache);
 }
 
+/*
+ * IP -> MAC as far as the neighbours know it. ARP wins: it speaks for the
+ * address that is live right now, and the snooped tables only fill the gaps
+ * ARP leaves on a bridging device.
+ */
+function ip_mac_map(arp, snoop) {
+	let map = {};
+
+	for (let entry in arp)
+		if (map[entry.ip] == null)
+			map[entry.ip] = entry.mac;
+
+	for (let entry in (snoop?.snoop4 ?? []))
+		if (map[entry.ip] == null)
+			map[entry.ip] = entry.mac;
+
+	for (let entry in (snoop?.snoop6 ?? []))
+		if (map[entry.ip] == null)
+			map[entry.ip] = entry.mac;
+
+	return map;
+}
+
 function snapshot(withPtr) {
 	let lan = lan_state();
 	let devices = device_names(lan.interfaces);
@@ -1671,19 +1706,7 @@ function snapshot(withPtr) {
 	 * (the DHCP Host-Name option above) and accepts what it hears. The
 	 * cache TTLs keep a watched page from re-asking names it already
 	 * resolved. */
-	let ipMac = {};
-
-	for (let entry in arp)
-		if (ipMac[entry.ip] == null)
-			ipMac[entry.ip] = entry.mac;
-
-	for (let entry in (snoop?.snoop4 ?? []))
-		if (ipMac[entry.ip] == null)
-			ipMac[entry.ip] = entry.mac;
-
-	for (let entry in (snoop?.snoop6 ?? []))
-		if (ipMac[entry.ip] == null)
-			ipMac[entry.ip] = entry.mac;
+	let ipMac = ip_mac_map(arp, snoop);
 
 	/* Where the offload has zeroed conntrack's byte counters, replace them with
 	 * nlbwmon's offload-safe per-MAC bytes so the page shows real traffic. No
@@ -1883,6 +1906,113 @@ function bridge_derive(data, prev) {
 	data.bridge.totals = totals;
 }
 
+/*
+ * The per-device series, busiest first and as flat arrays: the MAC would
+ * otherwise be repeated for every one of the 180 points it appears in, and
+ * this table lives in RAM next to the rest of the snapshot. The page turns the
+ * arrays back into the objects its chart already reads.
+ */
+function trend_macs(per_mac) {
+	let ranked = [];
+	let out = {};
+
+	for (let mac, entry in per_mac)
+		push(ranked, [ mac, (entry.up ?? 0) + (entry.down ?? 0) ]);
+
+	sort(ranked, (a, b) => b[1] - a[1]);
+
+	for (let i = 0; i < TREND_MACS && i < length(ranked); i++) {
+		let entry = per_mac[ranked[i][0]];
+
+		out[ranked[i][0]] = [
+			entry.up, entry.down,
+			entry.lanUp, entry.lanDown,
+			entry.wanUp, entry.wanDown
+		];
+	}
+
+	return out;
+}
+
+/*
+ * One point of the series the page draws, appended to the one already in the
+ * file. This is the part the browser used to keep in memory: a chart that
+ * starts at "whenever the page was opened" answers no question, and the
+ * collector is already sampling on a clock, so the history costs one array.
+ *
+ * On a bridge the per-client counters are frozen by the offload, so the point
+ * comes from the port counters - and there is no per-device series at L2,
+ * because a port counter cannot say which client a frame belonged to.
+ */
+function trend_append(data, prev, ipMac) {
+	let trend = (type(prev?.trend) == 'array') ? prev.trend : [];
+	let point = { t: data.ts, valid: ((data.rate_window ?? 0) > 0) };
+
+	if (data.bridge?.mode) {
+		let uplink = data.bridge.uplink;
+		let local = { up: 0, down: 0 };
+		let wan = { up: 0, down: 0 };
+
+		for (let dev, r in (data.bridge.rates ?? {})) {
+			let bucket = (dev == uplink) ? wan : local;
+
+			/* rx on a member is a client's upload, tx its download; the
+			 * uplink's counters face the other way. */
+			bucket.up += (dev == uplink) ? (r.tx ?? 0) : (r.rx ?? 0);
+			bucket.down += (dev == uplink) ? (r.rx ?? 0) : (r.tx ?? 0);
+		}
+
+		point.lanUp = (local.up > wan.up) ? local.up - wan.up : 0;
+		point.lanDown = (local.down > wan.down) ? local.down - wan.down : 0;
+		point.wanUp = wan.up;
+		point.wanDown = wan.down;
+	}
+	else {
+		let per_mac = {};
+
+		point.lanUp = 0;
+		point.lanDown = 0;
+		point.wanUp = 0;
+		point.wanDown = 0;
+
+		for (let ip, rate in (data.rates ?? {})) {
+			let mac = ipMac[ip];
+			let entry = null;
+
+			point.lanUp += rate.lanUp ?? 0;
+			point.lanDown += rate.lanDown ?? 0;
+			point.wanUp += rate.wanUp ?? 0;
+			point.wanDown += rate.wanDown ?? 0;
+
+			if (mac == null)
+				continue;
+
+			entry = per_mac[mac];
+
+			if (entry == null) {
+				entry = { up: 0, down: 0, lanUp: 0, lanDown: 0, wanUp: 0, wanDown: 0 };
+				per_mac[mac] = entry;
+			}
+
+			entry.up += rate.up ?? 0;
+			entry.down += rate.down ?? 0;
+			entry.lanUp += rate.lanUp ?? 0;
+			entry.lanDown += rate.lanDown ?? 0;
+			entry.wanUp += rate.wanUp ?? 0;
+			entry.wanDown += rate.wanDown ?? 0;
+		}
+
+		point.macs = trend_macs(per_mac);
+	}
+
+	push(trend, point);
+
+	if (length(trend) > TREND_POINTS)
+		trend = slice(trend, length(trend) - TREND_POINTS);
+
+	data.trend = trend;
+}
+
 function file_bytes(path) {
 	try {
 		return fs.stat(path)?.size ?? 0;
@@ -2037,6 +2167,32 @@ function map_shrink(map) {
 	return true;
 }
 
+/* The trend is the reason the file exists, so it goes last: first the
+ * per-device series (the aggregate line is what the chart is for), then the
+ * points themselves, oldest eighth. */
+function trend_drop(data) {
+	let trend = data.trend;
+
+	if (type(trend) != 'array' || !length(trend))
+		return false;
+
+	let stripped = false;
+
+	for (let point in trend) {
+		if (point.macs != null) {
+			delete point.macs;
+			stripped = true;
+		}
+	}
+
+	if (stripped)
+		return true;
+
+	splice(trend, 0, int(length(trend) / 8) + 1);
+
+	return true;
+}
+
 function snapshot_drop(data) {
 	if (traffic_drop(data)) return true;
 	if (list_shrink(data.snoop4)) return true;
@@ -2045,6 +2201,7 @@ function snapshot_drop(data) {
 	if (list_shrink(data.neigh6)) return true;
 	if (map_shrink(data.names)) return true;
 	if (map_shrink(data.wifi)) return true;
+	if (trend_drop(data)) return true;
 
 	return false;
 }
@@ -2317,6 +2474,7 @@ if (length(ARGV)) {
 		 * somebody is looking. */
 		traffic_derive(snap, prev);
 		bridge_derive(snap, prev);
+		trend_append(snap, prev, ip_mac_map(snap.arp, { snoop4: snap.snoop4, snoop6: snap.snoop6 }));
 
 		/* The archive is merged on its own, slower clock and rides on the
 		 * snapshot already in hand - walking conntrack is what costs, so the
