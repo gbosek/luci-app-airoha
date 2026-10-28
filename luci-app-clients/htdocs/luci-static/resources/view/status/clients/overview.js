@@ -184,18 +184,34 @@ return L.Class.extend({
 	},
 
 	renderSummary: function(summary) {
-		function block(label, up, down, totalUp, totalDown) {
-			return E('div', { 'class': 'clients-block' }, [
+		/* `idle` renders the tile as "not applicable" rather than "zero": on a
+		 * routed box with one LAN subnet the counter can never move, and a hard
+		 * 0 B/s there reads as a broken figure instead of an empty scope. */
+		function block(label, up, down, totalUp, totalDown, title, idle) {
+			var attrs = { 'class': 'clients-block' };
+
+			if (title)
+				attrs.title = title;
+
+			function rate(value) {
+				return idle ? '—' : common.formatRate(value);
+			}
+
+			function total(value) {
+				return idle ? '' : '(' + common.formatSize(value) + ')';
+			}
+
+			return E('div', attrs, [
 				E('div', { 'class': 'clients-block__title' }, label),
 				E('div', { 'class': 'clients-block__row' }, [
 					E('span', { 'class': 'clients-block__dir clients-block__dir--up' }, '↑'),
-					E('span', { 'class': 'clients-block__rate' }, common.formatRate(up)),
-					E('span', { 'class': 'clients-block__total' }, '(' + common.formatSize(totalUp) + ')')
+					E('span', { 'class': 'clients-block__rate' }, rate(up)),
+					E('span', { 'class': 'clients-block__total' }, total(totalUp))
 				]),
 				E('div', { 'class': 'clients-block__row' }, [
 					E('span', { 'class': 'clients-block__dir clients-block__dir--down' }, '↓'),
-					E('span', { 'class': 'clients-block__rate' }, common.formatRate(down)),
-					E('span', { 'class': 'clients-block__total' }, '(' + common.formatSize(totalDown) + ')')
+					E('span', { 'class': 'clients-block__rate' }, rate(down)),
+					E('span', { 'class': 'clients-block__total' }, total(totalDown))
 				])
 			]);
 		}
@@ -204,8 +220,24 @@ return L.Class.extend({
 		var totalDown = summary.lanDown + summary.wanDown;
 		var totalUpBytes = summary.lanTotalUp + summary.wanTotalUp;
 		var totalDownBytes = summary.lanTotalDown + summary.wanTotalDown;
+		var viaPorts = !!(this.store.state.bridge && this.store.state.bridge.mode);
 
+		/* No LAN-scope byte since the collector started, on a box that would
+		 * have to route them to see them: nothing has crossed between LAN
+		 * subnets, so there is no number to show rather than a zero. */
+		var lanIdle = !viaPorts &&
+			!(summary.lanUp || summary.lanDown || summary.lanTotalUp || summary.lanTotalDown);
+
+		/* The LAN figure means different things depending on the role of this
+		 * box, so it says which one it is instead of leaving the reader to
+		 * wonder why a busy LAN can read zero. */
 		dom.content(this.summary, [
+			block(_('LAN traffic'), summary.lanUp, summary.lanDown,
+				summary.lanTotalUp, summary.lanTotalDown,
+				viaPorts
+					? _('What the clients on this LAN exchanged with each other, counted by the hardware port counters.')
+					: _('Traffic this box routed between LAN subnets. Frames between two clients of the same subnet are switched, not routed, so they never reach this counter.'),
+				lanIdle),
 			block(_('WAN traffic'), summary.wanUp, summary.wanDown,
 				summary.wanTotalUp, summary.wanTotalDown),
 			block(_('Total'), totalUp, totalDown, totalUpBytes, totalDownBytes),
@@ -646,8 +678,8 @@ return L.Class.extend({
 			this.chart,
 			E('p', { 'class': 'clients-note' },
 				bridgeMode
-					? _('This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port. The bracketed figures are counted by the background collector since it started.')
-					: _('Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are counted by the background collector since it started - conntrack counters belong to a flow, so they are a floor, not a lifetime total.'))
+					? _('This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port, LAN is what the remaining ports carried. The bracketed figures are counted by the background collector since it started.')
+					: _('Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are counted by the background collector since it started - conntrack counters belong to a flow, so they are a floor, not a lifetime total. LAN traffic is what this box routed between LAN subnets; frames between two clients of the same subnet are switched by the bridge and never reach conntrack.'))
 		])
 	]);
 	}

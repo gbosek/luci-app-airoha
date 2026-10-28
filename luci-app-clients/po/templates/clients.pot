@@ -57,9 +57,6 @@ msgstr ""
 msgid "dBm"
 msgstr ""
 
-msgid "This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port, LAN is what moved between the clients attached here. The bracketed figures accumulate while this view is open."
-msgstr ""
-
 msgid "Connections"
 msgstr ""
 
@@ -216,9 +213,6 @@ msgstr ""
 msgid "No samples yet. The chart appears as soon as the background collector records one."
 msgstr ""
 
-msgid "Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are counted by the background collector since it started - conntrack counters belong to a flow, so they are a floor, not a lifetime total."
-msgstr ""
-
 msgid "Traffic counted by the background collector since it started. conntrack counters belong to a flow, so the figure is a floor, not a lifetime total."
 msgstr ""
 
@@ -316,11 +310,20 @@ msgstr ""
 msgid "WAN counts traffic to addresses outside this network; traffic between local hosts is not shown. Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows."
 msgstr ""
 
-msgid "This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port. The bracketed figures are counted by the background collector since it started."
-msgstr ""
-
 msgid "Live rate"
 msgstr ""
 
 msgid "Total traffic"
+msgstr ""
+
+msgid "What the clients on this LAN exchanged with each other, counted by the hardware port counters."
+msgstr ""
+
+msgid "Traffic this box routed between LAN subnets. Frames between two clients of the same subnet are switched, not routed, so they never reach this counter."
+msgstr ""
+
+msgid "Rates are differentiated from kernel conntrack counters, which keep counting for hardware-offloaded flows. The bracketed figures are counted by the background collector since it started - conntrack counters belong to a flow, so they are a floor, not a lifetime total. LAN traffic is what this box routed between LAN subnets; frames between two clients of the same subnet are switched by the bridge and never reach conntrack."
+msgstr ""
+
+msgid "This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port, LAN is what the remaining ports carried. The bracketed figures are counted by the background collector since it started."
 msgstr ""

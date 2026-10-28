@@ -57,6 +57,26 @@ a sample.
 page falls back to it - differencing the counters locally - when the file is
 missing because the service is stopped.
 
+### What the LAN figure counts
+
+The three tiles on the overview page are LAN, WAN and Total, where Total is the
+sum of the other two. Both halves come from conntrack accounting, split by the
+far-end address of each flow: an address inside a LAN subnet is LAN, anything
+else is WAN.
+
+Two clients on the **same** subnet never appear in that LAN figure. Their frames
+are forwarded by the bridge at layer 2, so no conntrack entry is ever created and
+no counter the kernel exposes for this purpose moves. On a routed box with a
+single LAN subnet the LAN tile therefore has nothing to report, and it shows an
+em dash instead of `0 B/s` - a zero would suggest the figure is measured and
+happens to be idle. It turns into real numbers as soon as traffic crosses between
+LAN subnets, which is the only LAN traffic conntrack can see.
+
+On a bridge (an AP), where the box switches rather than routes, the figures come
+from the hardware port counters instead: WAN is the uplink port, LAN is the sum
+of the remaining member ports. Those counters do see client-to-client traffic,
+so the LAN tile is meaningful there.
+
 The archive merge rides on the same pass but on a slower clock
 (`clients.global.interval`), and the stamp that decides it lives in the live
 file, so the loop needs no other state.
