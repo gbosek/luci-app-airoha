@@ -150,20 +150,22 @@ const TREND_POINTS = 180;
  * it lives in. */
 const TREND_MACS = 8;
 
-/* Points kept in the fast ring. At the 2 s tick the page runs this is six
+/* Points kept in the fast ring. At the 1 s tick the page runs this is three
  * minutes, which covers the shortest window the chart offers (five) with room
  * for a late tick, at a granularity the 10 s trend cannot express. */
 const SAMPLE_POINTS = 180;
 
 /* Width of the moving window the tick reports over. The counters behind it are
  * reconciled in bursts of a few seconds, so a single tick is too thin a
- * baseline to divide by - see the note in tick() for the measurement. */
-const SAMPLE_SPAN = 6;
+ * baseline to divide by - see the note in tick() for the measurement. Kept
+ * short because the window is also the lag the tile shows: three seconds is
+ * enough to span a batch boundary without the number trailing the network. */
+const SAMPLE_SPAN = 3;
 
-/* Hosts remembered between two ticks so the scopes can be differenced. The
- * ring is RAM and one row is six numbers; the bound keeps a pathological
- * address table from turning the smallest file here into a large one. */
-const SAMPLE_HOSTS = 256;
+/* Devices that can be the WAN side when no bridge contains it. A router's
+ * uplink is routed, so it is not a brif member and has to be named; PPPoE
+ * first because that is the shape on this fleet, then the plain names. */
+const WAN_CANDIDATES = [ 'pppoe-wan', 'wan', 'wwan', 'wwan0', 'usb0' ];
 
 /* A rate is only meaningful across a short window. If the collector was
  * stopped, suspended or simply ran late, the counters moved but the interval
@@ -1069,52 +1071,152 @@ function conntrack_stats() {
  * WAN figure; the sum of the other members, minus what crossed the uplink,
  * is the traffic between this device's own clients.
  */
+/* One interface counter, or null if the device has no statistics node. */
+function counter(dev, field) {
+	let raw = read('/sys/class/net/' + dev + '/statistics/' + field);
+
+	if (raw == null)
+		return null;
+
+	let value = int(trim(raw));
+
+	return (value != null) ? value : null;
+}
+
+/* Every bridge on the box and its member counters, read straight from sysfs.
+ *
+ * This used to shell out: a `for d in /sys/class/net/*` loop that also forked
+ * `basename` twice per member. Measured on target at 25 ms - and it is on the
+ * path of a sampler that has to fit a whole pass into one second, so it is now
+ * two opendir walks and a handful of small reads, about 2 ms.
+ */
+function port_scan() {
+	let ports = {};
+	let bridges = {};
+	let net = fs.opendir('/sys/class/net');
+
+	if (net == null)
+		return { ports: ports, bridges: bridges };
+
+	let dev;
+
+	while ((dev = net.read()) != null) {
+		if (dev == '.' || dev == '..')
+			continue;
+
+		let brif = fs.opendir('/sys/class/net/' + dev + '/brif');
+
+		if (brif == null)
+			continue;
+
+		let list = [];
+		let member;
+
+		while ((member = brif.read()) != null) {
+			if (member == '.' || member == '..')
+				continue;
+
+			push(list, member);
+
+			if (ports[member] != null)
+				continue;
+
+			let rx = counter(member, 'rx_bytes');
+			let tx = counter(member, 'tx_bytes');
+
+			if (rx == null || tx == null)
+				continue;
+
+			ports[member] = { rx: rx, tx: tx };
+		}
+
+		brif.close();
+
+		if (length(list))
+			bridges[dev] = list;
+	}
+
+	net.close();
+
+	return { ports: ports, bridges: bridges };
+}
+
+/* The port table of the bridge that carries the clients.
+ *
+ * One bridge, not all of them: this fleet has a second bridge for IPTV
+ * (br-iptv, with the multicast and service ports on it), and its members are
+ * not LAN traffic. Summing every bridge would put the television stream into
+ * the LAN figure - the same mistake nlbwmon makes, which is why the WAN column
+ * had to be corrected for it once already.
+ *
+ * `br-lan` is the name OpenWrt gives it; anything else is a guess, and the
+ * widest bridge is the least bad one.
+ */
 function port_counters() {
-	let lines = split(trim(run(
-		'for d in /sys/class/net/*; do [ -d "$d/brif" ] && for m in "$d"/brif/*; do echo "$(basename "$d") $(basename "$m")"; done; done 2>/dev/null'
-	)), '\n');
+	let scan = port_scan();
+	let chosen = null;
 	let ports = {};
 	let members = [];
 	let bridges = {};
 	let uplink = null;
 
-	for (let line in lines) {
-		let parts = split(trim(line), ' ');
+	if (scan.bridges['br-lan'] != null) {
+		chosen = 'br-lan';
+	}
+	else {
+		let best = -1;
 
-		if (length(parts) != 2)
-			continue;
+		for (let name, list in scan.bridges) {
+			if (length(list) > best) {
+				best = length(list);
+				chosen = name;
+			}
+		}
+	}
 
-		let bridge = parts[0];
-		let member = parts[1];
+	if (chosen != null) {
+		bridges[chosen] = scan.bridges[chosen];
 
-		if (ports[member] != null)
-			continue;
+		for (let member in bridges[chosen]) {
+			if (scan.ports[member] == null)
+				continue;
 
-		let rx = int(trim(read('/sys/class/net/' + member + '/statistics/rx_bytes')));
-		let tx = int(trim(read('/sys/class/net/' + member + '/statistics/tx_bytes')));
+			ports[member] = scan.ports[member];
+			push(members, member);
 
-		if (rx == null || tx == null)
-			continue;
-
-		ports[member] = { rx: rx, tx: tx };
-		push(members, member);
-
-		if (bridges[bridge] == null)
-			bridges[bridge] = [];
-
-		push(bridges[bridge], member);
-
-		if (member == 'wan')
-			uplink = member;
+			if (member == 'wan')
+				uplink = member;
+		}
 	}
 
 	return {
+		name: chosen,
 		mode: uplink != null,
 		uplink: uplink,
 		members: members,
 		ports: ports,
 		bridges: bridges
 	};
+}
+
+/* The interface whose counters are the WAN figure.
+ *
+ * On an AP that is a bridge member named "wan", and port_counters() already has
+ * it. On a router the uplink is routed, no bridge contains it, and it has to be
+ * found by name - but it still belongs in the same table, because the LAN
+ * figure is the member sum minus what crossed the uplink. Both numbers have to
+ * come from one consistent read or the subtraction is between two different
+ * moments.
+ */
+function wan_device(bridge) {
+	if (bridge?.uplink != null)
+		return bridge.uplink;
+
+	for (let dev in WAN_CANDIDATES)
+		if (counter(dev, 'rx_bytes') != null)
+			return dev;
+
+	return null;
 }
 
 /* ---------------- nlbwmon long-term counters ---------------- */
@@ -1760,6 +1862,20 @@ function snapshot(withPtr) {
 	let names = host_names(leases);
 	let snoop = snoop_state();
 	let bridge = port_counters();
+	let wan = wan_device(bridge);
+
+	/* The uplink belongs in the port table even when it is not a bridge
+	 * member. The LAN figure is the member sum minus what crossed it, so both
+	 * ends of the subtraction have to be read at the same moment and carried
+	 * in the same object - otherwise the page and the sampler end up
+	 * differencing numbers taken seconds apart. */
+	if (wan != null && bridge.ports[wan] == null) {
+		let rx = counter(wan, 'rx_bytes');
+		let tx = counter(wan, 'tx_bytes');
+
+		if (rx != null && tx != null)
+			bridge.ports[wan] = { rx: rx, tx: tx };
+	}
 
 	/* Names the clients reported themselves (DHCP option 12, heard on the
 	 * bridge) fill the gaps the lease file and the hints leave open - which
@@ -1859,6 +1975,10 @@ function snapshot(withPtr) {
 		bridge: {
 			mode: bridge.mode,
 			uplink: bridge.uplink,
+			/* The device the LAN figure is measured against - a bridge member
+			 * on an AP, pppoe-wan or wan on a router. */
+			wan: wan,
+			lan: bridge.name,
 			members: bridge.members,
 			ports: bridge.ports
 		},
@@ -2015,33 +2135,11 @@ const INTRA_COMMENT = 'intra-lan';
  * the feature reports itself unavailable and the page leaves the row out.
  */
 function lan_bridge() {
+	/* The choice lives in port_counters() so that the counter, the sampler
+	 * and the page all name the same bridge. */
 	let pc = port_counters();
-	let chosen = null;
 
-	if (pc.bridges['br-lan'] != null) {
-		chosen = 'br-lan';
-	}
-	else {
-		let best = -1;
-
-		for (let name, members in pc.bridges) {
-			if (length(members) > best) {
-				best = length(members);
-				chosen = name;
-			}
-		}
-	}
-
-	if (chosen == null)
-		return { bridge: null, uplink: null };
-
-	let uplink = null;
-
-	for (let member in pc.bridges[chosen])
-		if (member == 'wan')
-			uplink = 'wan';
-
-	return { bridge: chosen, uplink: uplink };
+	return { bridge: pc.name, uplink: pc.uplink };
 }
 
 /* Reads the rule's own counters back out of nft's JSON, including the bridge
@@ -2225,24 +2323,49 @@ function trend_append(data, prev, ipMac) {
 	if (data.intra?.ok == true)
 		point.intra = data.intra.rate ?? 0;
 
-	if (data.bridge?.mode) {
-		let uplink = data.bridge.uplink;
-		let local = { up: 0, down: 0 };
-		let wan = { up: 0, down: 0 };
+	/* The four aggregate rates come from the port counters, on a router as
+	 * much as on a bridge.
+	 *
+	 * They used to come from conntrack on a routed box, and on this fleet that
+	 * read zero for LAN every single pass: two clients on the same bridge talk
+	 * through the switch and never enter the flow table, so there was nothing
+	 * to count. The port counters see those frames, and the sampler behind the
+	 * tiles already reports them - sharing the formula is what keeps the
+	 * coarse point and the fast ring from disagreeing at the seam where the
+	 * chart switches from one to the other.
+	 *
+	 * Per-client rates stay on conntrack: it is the only thing that knows
+	 * which address moved the bytes. */
+	let wan = data.bridge?.wan ?? data.bridge?.uplink;
+	let portRates = data.bridge?.rates;
+	let l2 = null;
 
-		for (let dev, r in (data.bridge.rates ?? {})) {
-			let bucket = (dev == uplink) ? wan : local;
+	if (portRates != null) {
+		let local = { up: 0, down: 0 };
+		let wide = { up: 0, down: 0 };
+
+		for (let dev, r in portRates) {
+			let bucket = (dev == wan) ? wide : local;
 
 			/* rx on a member is a client's upload, tx its download; the
 			 * uplink's counters face the other way. */
-			bucket.up += (dev == uplink) ? (r.tx ?? 0) : (r.rx ?? 0);
-			bucket.down += (dev == uplink) ? (r.rx ?? 0) : (r.tx ?? 0);
+			bucket.up += (dev == wan) ? (r.tx ?? 0) : (r.rx ?? 0);
+			bucket.down += (dev == wan) ? (r.rx ?? 0) : (r.tx ?? 0);
 		}
 
-		point.lanUp = (local.up > wan.up) ? local.up - wan.up : 0;
-		point.lanDown = (local.down > wan.down) ? local.down - wan.down : 0;
-		point.wanUp = wan.up;
-		point.wanDown = wan.down;
+		l2 = {
+			wanUp: wide.up,
+			wanDown: wide.down,
+			lanUp: (local.up > wide.up) ? local.up - wide.up : 0,
+			lanDown: (local.down > wide.down) ? local.down - wide.down : 0
+		};
+	}
+
+	if (l2 != null) {
+		point.lanUp = l2.lanUp;
+		point.lanDown = l2.lanDown;
+		point.wanUp = l2.wanUp;
+		point.wanDown = l2.wanDown;
 	}
 	else {
 		let per_mac = {};
@@ -2549,50 +2672,6 @@ function sample_scopes(ports, before, uplink) {
 	};
 }
 
-/* Conntrack counters to the four scopes, host by host and clamped host by
- * host: summing first and clamping after would let one host's reset cancel out
- * the traffic every other host really moved. */
-function sample_conntrack(hosts, before) {
-	let scope = { wanUp: 0, wanDown: 0, lanUp: 0, lanDown: 0 };
-
-	for (let ip, cur in hosts) {
-		let was = (before != null) ? before[ip] : null;
-
-		if (type(was) != 'array')
-			continue;
-
-		scope.lanUp += grew(cur[2], int(was[2]) ?? 0);
-		scope.lanDown += grew(cur[3], int(was[3]) ?? 0);
-		scope.wanUp += grew(cur[4], int(was[4]) ?? 0);
-		scope.wanDown += grew(cur[5], int(was[5]) ?? 0);
-	}
-
-	return scope;
-}
-
-/* The busiest hosts are the ones a rate is drawn from, so they are the ones
- * kept when the table is larger than the bound. */
-function sample_hosts(hosts) {
-	let names = keys(hosts);
-
-	if (length(names) <= SAMPLE_HOSTS)
-		return hosts;
-
-	let ranked = [];
-
-	for (let ip in names)
-		push(ranked, [ ip, hosts[ip][0] + hosts[ip][1] ]);
-
-	sort(ranked, function(a, b) { return b[1] - a[1]; });
-
-	let kept = {};
-
-	for (let i = 0; i < SAMPLE_HOSTS; i++)
-		kept[ranked[i][0]] = hosts[ranked[i][0]];
-
-	return kept;
-}
-
 function sample_drop(data) {
 	let samples = data.samples;
 
@@ -2614,53 +2693,42 @@ function tick(path, max_bytes) {
 	let now = time();
 	let dt = now - (int(prev?.ts) ?? 0);
 	let fresh = (dt > 0 && dt <= RATE_MAX_GAP);
-	let lan = lan_state();
-	let devices = device_names(lan.interfaces);
-	let hosts = traffic(all_subnets(lan.interfaces), lan.local);
 	let bridge = port_counters();
-	let intra = intra_read();
-	let counters = {};
+	let uplink = wan_device(bridge);
+	let cur = {};
 	let ports = {};
 	let deltas;
-	let intra_delta = 0;
-	let intra_bytes = null;
-	let intra_measured = false;
 
-	/* The same merge the 10 s pass makes, so the two agree on what "WAN" is:
-	 * where the offload has zeroed conntrack's byte counters, nlbwmon is the
-	 * only source that still sees the traffic, and a tile reading conntrack
-	 * alone on such a box would sit near zero while the network is busy. */
-	nlbw_into_traffic(hosts, ip_mac_map(arp_entries(devices), snoop_state()));
-
-	for (let ip in hosts) {
-		let one = flat_counters(hosts[ip]);
-
-		counters[ip] = [ one.up, one.down, one.lanUp, one.lanDown, one.wanUp, one.wanDown ];
-	}
-
+	/*
+	 * Four numbers out of sysfs, and nothing else.
+	 *
+	 * The earlier version walked conntrack and merged nlbwmon on every pass,
+	 * which measured 440 ms - a 1 s cadence cannot afford that, and it did not
+	 * need to: the tile asks for aggregate bytes, and the interface counters
+	 * answer that directly. Per-client attribution still needs conntrack and
+	 * nlbwmon, but that belongs to the 10 s pass that draws the roster, not to
+	 * the sampler that keeps the tile moving.
+	 *
+	 * The uplink is measured even when no bridge contains it. A router's WAN
+	 * is a routed device - pppoe-wan here - so it is not a brif member, yet
+	 * the LAN figure is the member sum minus what crossed it, and both numbers
+	 * have to come from the same read or the subtraction mixes two moments.
+	 */
 	for (let dev, one in bridge.ports)
-		ports[dev] = [ int(one?.rx) ?? 0, int(one?.tx) ?? 0 ];
+		cur[dev] = { rx: int(one?.rx) ?? 0, tx: int(one?.tx) ?? 0 };
 
-	if (bridge.mode) {
-		/* The port counters already contain the frames two clients
-		 * exchanged, so the intra counter is neither added here nor
-		 * published: the page would fold it in a second time. */
-		deltas = sample_scopes(bridge.ports, prev?.p, bridge.uplink);
+	if (uplink != null && cur[uplink] == null) {
+		let rx = counter(uplink, 'rx_bytes');
+		let tx = counter(uplink, 'tx_bytes');
+
+		if (rx != null && tx != null)
+			cur[uplink] = { rx: rx, tx: tx };
 	}
-	else {
-		deltas = sample_conntrack(counters, prev?.h ?? {});
 
-		if (intra.ok) {
-			intra_bytes = int(intra.bytes) ?? 0;
-			intra_measured = true;
+	for (let dev, one in cur)
+		ports[dev] = [ one.rx, one.tx ];
 
-			let was = (prev?.i != null) ? int(prev.i) : null;
-
-			/* A rebuilt rule restarts at zero: the counter is still valid,
-			 * the traffic behind it is not measurable this tick. */
-			intra_delta = (was != null && intra_bytes >= was) ? intra_bytes - was : 0;
-		}
-	}
+	deltas = sample_scopes(cur, prev?.p, uplink);
 
 	/*
 	 * The window is a moving average, not the last tick on its own.
@@ -2668,8 +2736,8 @@ function tick(path, max_bytes) {
 	 * These counters move in bursts - measured on target, an idle-looking
 	 * network still accumulates 80 KB one second and nothing the next, because
 	 * the accounting is reconciled in batches. A tick that lands in a gap
-	 * reports zero, and with a two second cadence that turns the tile into a
-	 * comb: 60 KB/s, 0, 60 KB/s, 0. Averaging the last few ticks hides the
+	 * reports zero, and at a one second cadence that turns the tile into a
+	 * comb: 60 KB/s, 0, 80 KB/s, 0. Averaging the last few ticks hides the
 	 * batch boundaries without inventing traffic: whatever went into the sum
 	 * also came out of a counter.
 	 *
@@ -2678,24 +2746,22 @@ function tick(path, max_bytes) {
 	 */
 	let recent = (fresh && type(prev?.recent) == 'array') ? prev.recent : [];
 	let scope = { wanUp: 0, wanDown: 0, lanUp: 0, lanDown: 0 };
-	let intra_rate = -1;
 	let span = 0;
-	let sums = [ 0, 0, 0, 0, 0 ];
+	let sums = [ 0, 0, 0, 0 ];
 
 	if (fresh)
-		push(recent, [ deltas.wanUp, deltas.wanDown, deltas.lanUp, deltas.lanDown,
-			intra_delta, dt ]);
+		push(recent, [ deltas.wanUp, deltas.wanDown, deltas.lanUp, deltas.lanDown, dt ]);
 
 	for (let entry in recent)
-		span += int(entry[5]) ?? 0;
+		span += int(entry[4]) ?? 0;
 
 	while (length(recent) > 1 && span > SAMPLE_SPAN) {
-		span -= int(recent[0][5]) ?? 0;
+		span -= int(recent[0][4]) ?? 0;
 		splice(recent, 0, 1);
 	}
 
 	for (let entry in recent)
-		for (let i = 0; i < 5; i++)
+		for (let i = 0; i < 4; i++)
 			sums[i] += int(entry[i]) ?? 0;
 
 	if (span > 0) {
@@ -2703,21 +2769,16 @@ function tick(path, max_bytes) {
 		scope.wanDown = int((sums[1] / span) + 0.5);
 		scope.lanUp = int((sums[2] / span) + 0.5);
 		scope.lanDown = int((sums[3] / span) + 0.5);
-
-		/* -1 stays "this box has no such counter", which the page reads as
-		 * "leave LAN as measured" rather than as a zero. A bridge that
-		 * happens to have the rule installed keeps -1 too: its port counters
-		 * already contain those frames. */
-		if (intra_measured)
-			intra_rate = int((sums[4] / span) + 0.5);
 	}
 
 	/* One row per tick: when it was measured, the four rates, the intra rate
-	 * (-1 where no such counter exists), and the window they were divided by.
-	 * A zero window marks a tick with no baseline, which the page uses to
-	 * break the line instead of drawing a drop to zero. */
+	 * (-1: the frames two clients exchanged are already in the port counters
+	 * this row was differenced from, and the page folds a number here), and
+	 * the window they were divided by. A zero window marks a tick with no
+	 * baseline, which the page uses to break the line instead of drawing a
+	 * drop to zero. */
 	push(samples, [ now, scope.wanUp, scope.wanDown, scope.lanUp, scope.lanDown,
-		intra_rate, span ]);
+		-1, span ]);
 
 	if (length(samples) > SAMPLE_POINTS)
 		samples = slice(samples, length(samples) - SAMPLE_POINTS);
@@ -2732,9 +2793,7 @@ function tick(path, max_bytes) {
 		 * and the same clock; the page ignores it. */
 		prev: {
 			ts: now,
-			h: sample_hosts(counters),
 			p: ports,
-			i: intra_bytes,
 			recent: recent
 		}
 	}, max_bytes, sample_drop);
@@ -2746,9 +2805,58 @@ function tick(path, max_bytes) {
 		samples: length(samples),
 		window: span,
 		bridge: bridge.mode,
+		uplink: uplink,
 		scope: scope,
 		trimmed: written?.trimmed ?? false
 	};
+}
+
+/* Milliseconds on the monotonic clock: a cadence has to be measured against
+ * something that does not step when the wall clock is corrected. */
+function mono_ms() {
+	let c = clock(true);
+
+	return c[0] * 1000 + int(c[1] / 1000000);
+}
+
+/*
+ * The sampler proper: one interpreter, one parse, a tick on every step.
+ *
+ * Starting `clients-probe tick` from a shell loop costs 40 ms before any work
+ * happens - the interpreter reads and compiles this file every time - and at
+ * one tick per second that alone is four percent of a core. Here the parse is
+ * paid once and the loop only measures. Measured after the change: about 8 ms
+ * per tick, under one percent.
+ *
+ * The sleep is shortened by however long the pass took, so the cadence does not
+ * drift when a pass runs long; it is never shortened past MONO_FLOOR, because a
+ * pass that somehow overruns its own interval must not turn into a busy loop.
+ */
+const MONO_FLOOR = 100;
+const TICK_MAX_STEP = 60000;
+
+function loop(path, max_bytes, interval) {
+	let step = (int(interval) != null && int(interval) > 0) ? int(interval) : 1000;
+
+	if (step > TICK_MAX_STEP)
+		step = TICK_MAX_STEP;
+
+	while (true) {
+		let started = mono_ms();
+
+		try {
+			tick(path, max_bytes);
+		}
+		catch (e) {
+			/* One bad pass must not take the sampler down. The ring already
+			 * carries gap markers, so a missed tick shows up as a break in
+			 * the line rather than as a file that stops moving. */
+		}
+
+		let wait = step - (mono_ms() - started);
+
+		sleep((wait > MONO_FLOOR) ? wait : MONO_FLOOR);
+	}
 }
 
 /* ---------------- history ---------------- */
@@ -3079,8 +3187,12 @@ if (length(ARGV)) {
 	else if (cmd == 'tick')
 		result = tick((ARGV[1] != null && length(ARGV[1])) ? ARGV[1] : DEFAULT_SAMPLES,
 			number_arg(ARGV[2], DEFAULT_MAX_BYTES));
+	else if (cmd == 'loop')
+		result = loop((ARGV[1] != null && length(ARGV[1])) ? ARGV[1] : DEFAULT_SAMPLES,
+			number_arg(ARGV[2], DEFAULT_MAX_BYTES),
+			number_arg(ARGV[3], 1000));
 	else
-		result = { ok: false, error: 'usage: clients-probe [collect|read|clear|status|nlbw|intra|intra-setup|tick] [path|period] [retention_days] [every] [snapshot] [max_bytes]' };
+		result = { ok: false, error: 'usage: clients-probe [collect|read|clear|status|nlbw|intra|intra-setup|tick|loop] [path|period] [retention_days] [every|interval_ms] [snapshot] [max_bytes]' };
 
 	print(sprintf('%J\n', result));
 	exit((result.ok == false) ? 1 : 0);

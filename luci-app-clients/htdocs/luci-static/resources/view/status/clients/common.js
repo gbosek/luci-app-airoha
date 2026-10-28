@@ -47,11 +47,10 @@ var SAMPLE_INTERVAL = 5;
 var LEASE_INTERVAL = 30;
 var HISTORY_INTERVAL = 30;
 
-/* How often the fast ring is read. The tick behind it runs every two seconds,
- * so this is the shortest interval that can still show every sample; the
- * snapshot is still read on SAMPLE_INTERVAL, it just no longer paces the
- * tiles. */
-var TICK_INTERVAL = 2;
+/* How often the fast ring is read. The sampler behind it ticks once a second,
+ * so this is the shortest interval that still shows every sample; the snapshot
+ * is still read on SAMPLE_INTERVAL, it just no longer paces the tiles. */
+var TICK_INTERVAL = 1;
 
 /* Fallback path only: a gap this long means the tab was hidden or the timer was
  * throttled, and dividing the accumulated bytes by it would invent a spike, so
@@ -1321,8 +1320,15 @@ function createStore() {
 			self.state.intra = (data.intra && data.intra.ok === true) ? data.intra : null;
 
 			if (self.trendFromFile) {
+				/* A snapshot that names the device it subtracts (`bridge.wan`,
+				 * a bridge member on an AP, pppoe-wan on a router) has already
+				 * put intra into its LAN figure - the port counters it was
+				 * differenced from contain those frames. Folding the separate
+				 * intra rate in on top of that would count them twice. */
+				var viaPorts = !!(bridge && (bridge.mode || bridge.wan));
+
 				self.trendCoarse = data.trend.map(function(point) {
-					return decodeTrendPoint(point, !!(bridge && bridge.mode));
+					return decodeTrendPoint(point, viaPorts);
 				});
 
 				/* The ring, if there is one, is laid over the newest part. */
@@ -1435,10 +1441,16 @@ function createStore() {
 		bridgeRates: function(useTotals) {
 			var bridge = this.state.bridge;
 
-			if (!bridge || !bridge.mode || !this.portRates)
+			/* `wan` names the device the LAN figure is measured against - a
+			 * bridge member called wan on an AP, pppoe-wan on a router. A
+			 * router has no such member, so the old test for bridge mode left
+			 * the tile on conntrack, which counts nothing for two clients
+			 * behind the same switch. */
+			var uplink = bridge ? (bridge.uplink || bridge.wan) : null;
+
+			if (!bridge || uplink == null || !this.portRates)
 				return null;
 
-			var uplink = bridge.uplink;
 			var rates = Object.create(null);
 			var local = { up: 0, down: 0 }, wan = { up: 0, down: 0 };
 

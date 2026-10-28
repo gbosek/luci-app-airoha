@@ -41,7 +41,7 @@ nothing here starts a measurement, and nothing polls a daemon over a socket.
 | `iwinfo` assoclist | SSID, band, signal, noise | `clients-probe` |
 | bridge snooping | IPv4 assignment evidence, IPv6 addresses learned from neighbour discovery | `clients-snoop`, long-running |
 | live snapshot | everything above, with the counters already turned into rates and running totals | `clients-probe collect`, every 10 s |
-| fast ring | the four overview tile figures, on their own cheaper clock | `clients-probe tick`, every 2 s |
+| fast ring | the four overview tile figures, on their own cheaper clock | `clients-probe loop`, every 1 s |
 | archive | first / last seen, last known association and name | `clients-probe collect`, every 30 s |
 | dnsmasq query log | DNS records with response time and result | `clients-dns collect`, every 10 s |
 | nftables bridge counter | traffic between two clients of the same subnet, which nothing else sees | `clients-probe intra-setup`, once at service start |
@@ -67,10 +67,10 @@ The snapshot answers "who is on my network", and answering that costs most of a
 second a pass - conntrack, ARP, `iwinfo`, `nlbwmon` and `nft`. Measured on
 target that is 0.47 s, so with the configured 10 s sleep it is rewritten every
 10.8 s, and anything reading it inherits that as its refresh rate. The four
-tiles at the top of the page do not need the roster, so `clients-probe tick`
-runs the cheap half on a 2 s clock and writes `/tmp/clients-samples.json`: one
-row per tick with the four scope rates, the inner-LAN rate and the window they
-were divided by, plus the counters the next tick differences against.
+tiles at the top of the page do not need the roster, so a second writer keeps
+`/tmp/clients-samples.json` moving once a second: one row per tick with the
+four scope rates, the inner-LAN rate and the window they were divided by, plus
+the counters the next tick differences against.
 
 Two files, two writers. They are not merged into one because two processes
 renaming over each other would lose a whole collection pass whenever they
@@ -80,19 +80,39 @@ would need.
 The page reads the ring on every poll and the snapshot on the slower one, then
 lays the ring's points over the newest part of the snapshot's series - the
 chart is one series, drawn from whichever source is fresher at that timestamp.
-A tick costs 0.34 s of CPU on an AN7581 (raised to 0.37 s when it has to walk
-conntrack as well), which is why `tick_interval` is a setting rather than a
-constant: at 2 s it is roughly a fifth of one core, at 10 s it disappears.
+
+**The tick reads four numbers out of sysfs and nothing else.** It was once a
+shorter version of the snapshot - conntrack, the ARP table, nlbwmon - which
+measured 0.34 s, and later 0.44 s. That is not a second's worth of work. What
+the tiles need is aggregate bytes per direction, and the interface counters
+answer exactly that in about 8 ms: `port_counters()` walks two sysfs
+directories, reads the members of the LAN bridge plus the uplink, and the four
+figures are one subtraction later. Per-client attribution still needs conntrack
+and nlbwmon, and that stays on the 10 s pass that draws the roster.
+
+Two details make the one second affordable:
+
+- **The loop owns the interpreter.** Starting `clients-probe tick` from a shell
+  costs 40 ms before any work happens - the interpreter reads and compiles this
+  file every time - which alone is four percent of a core at 1 Hz. `clients-probe
+  loop` parses once and ticks from inside a loop, shortening each sleep by
+  however long the pass took so the cadence does not drift. Measured on target
+  across 30 s: 25 jiffies, **0.83%**.
+- **Nothing on this path forks.** The port scan used to be a `for d in
+  /sys/class/net/*` shell loop that also ran `basename` twice per member, 25 ms
+  of process spawning; it is now `fs.opendir` and a handful of small reads. No
+  `nlbwmon`, no `nft`, no conntrack in the tick at all.
 
 Two details worth knowing before reading the numbers:
 
 - **The window is a moving average, not the last tick.** These counters are
-  reconciled in bursts, so a single 2 s baseline lands in a gap as often as not -
-  measured on target, an idle-looking network accumulated 80 KB one second and
-  nothing the next two. Dividing that by 2 s gives 40 KB/s, 0, 0, 40 KB/s: a
-  comb, not a measurement. The tick therefore sums the last `SAMPLE_SPAN` (6)
-  seconds of deltas and divides once, which hides the batch boundaries without
-  inventing traffic - every byte in the sum came out of a counter.
+  reconciled in bursts, so a single one-second baseline lands in a gap as often
+  as not - measured on target, an idle-looking network accumulated 80 KB one
+  second and nothing the next two. Dividing that by one second gives 80 KB/s, 0,
+  0: a comb, not a measurement. The tick therefore sums the last `SAMPLE_SPAN`
+  (3) seconds of deltas and divides once, which hides the batch boundaries
+  without inventing traffic - every byte in the sum came out of a counter. Three
+  seconds is short on purpose: the window is also the lag the tile shows.
 - **The ring carries no per-device split.** It is four figures and nothing
   else, so the device selector keeps reading the snapshot's series; only the
   tile and the coarse shape of the chart move at the faster cadence.
@@ -100,32 +120,42 @@ Two details worth knowing before reading the numbers:
 ### What the LAN figure counts
 
 The three tiles on the overview page are LAN, WAN and Total, where Total is the
-sum of the other two. Both halves come from conntrack accounting, split by the
-far-end address of each flow: an address inside a LAN subnet is LAN, anything
-else is WAN.
+sum of the other two. Both halves come from the **interface counters**, on a
+router as much as on an AP:
 
-Two clients on the **same** subnet never appear in that figure. Their frames are
-forwarded by the bridge at layer 2, so no conntrack entry is ever created and no
-counter conntrack exposes moves. On a routed box with a single LAN subnet the
-LAN tile therefore has nothing to report, and it shows an em dash instead of
-`0 B/s` - a zero would suggest the figure is measured and happens to be idle. It
-turns into real numbers as soon as traffic crosses between LAN subnets, which is
-the only LAN traffic conntrack can see.
+- **WAN** is the uplink device: `wan` when it is a bridge member, `pppoe-wan`
+  (or `wan`) when it is routed.
+- **LAN** is the sum of the LAN bridge's other members, minus what crossed the
+  uplink - the bytes that went out of the LAN ports but did not leave through
+  the WAN.
 
-On a bridge (an AP), where the box switches rather than routes, the figures come
-from the hardware port counters instead: WAN is the uplink port, LAN is the sum
-of the remaining member ports. Those counters do see client-to-client traffic,
-so the LAN tile is meaningful there.
+Those counters are what survives the hardware offload. On this fleet,
+`nf_conntrack`'s byte accounting is **frozen** for offloaded flows: measured on
+target, the WAN interface moved 2.82 MB in 43 s while every conntrack counter
+added up to exactly zero. Conntrack is still what attributes bytes to a client -
+it is the only source that knows which address sent them - but it cannot be the
+figure the tiles are drawn from.
 
-On a routed box the tile gets that traffic back from the counter described in the
-next section, so "LAN" means the same thing on both: everything that did not
-leave through the WAN.
+The same counters also fix a figure that used to read zero. Two clients on the
+**same** subnet are forwarded by the bridge at layer 2, so no conntrack entry is
+ever created; a routed box that drew LAN from conntrack had nothing to report for
+the commonest traffic on the network. The port counters see those frames, so LAN
+is now a real number on both roles, and an em dash only appears when the box
+genuinely has no LAN bridge to measure.
+
+Per-client figures on the devices page are a different matter: they still come
+from conntrack, corrected by `nlbwmon` where the offload has zeroed it. A
+client's own rate is therefore coarser than the tile above it, and on an AP it
+can stay near zero while the tile shows the port figure - the frames were
+counted at the port, not against any flow.
 
 ### Counting the traffic conntrack cannot see
 
-Switched frames are invisible to layer 3, so the page measures them where the
-kernel does expose them: a counter rule in the `bridge` family, installed once
-when the service starts.
+Switched frames are invisible to layer 3. The tiles get them from the port
+counters above; this counter exists as the fallback for a box where those are
+not available, and as the one figure that says how much of the LAN traffic never
+left the switch: a rule in the `bridge` family, installed once when the service
+starts.
 
 ```
 table bridge clients_intra {
@@ -248,7 +278,7 @@ nlbw` query path is still present on the backend but nothing calls it.
 | `clients.global.history_path` | `/tmp/clients-history.json` | archive location |
 | `clients.global.live_interval` | `10` | seconds between live snapshot passes |
 | `clients.global.snapshot_path` | `/tmp/clients-snapshot.json` | location the pages read |
-| `clients.global.tick_interval` | `2` | seconds between tile measurements; `0` switches the fast ring off |
+| `clients.global.tick_interval` | `1` | seconds between tile measurements; `0` switches the fast ring off |
 | `clients.global.samples_path` | `/tmp/clients-samples.json` | location of the fast ring |
 | `clients.global.max_bytes` | `262144` | byte ceiling per cache file |
 | `clients.dns.enabled` | `1` | DNS collector on/off |

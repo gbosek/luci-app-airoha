@@ -76,20 +76,21 @@ start_service() {
 	procd_set_param stderr 1
 	procd_close_instance
 
-	# The tiles need four numbers, not a roster, so they get their own clock.
-	# `collect` above costs 0.47 s on target and therefore cannot run faster
-	# than about once every few seconds; the pass here leaves out ARP for the
-	# roster, iw, the lease file and the names, and comes in at 0.34 s - still
-	# not free, which is why the interval is a setting instead of a constant.
+	# The tiles need four numbers, not a roster, so they get their own clock -
+	# and their own process, because the clock is now one second. A shell loop
+	# that re-executes the probe every second pays 40 ms of interpreter startup
+	# and script parsing before any work happens: four percent of a core, which
+	# is more than the whole sampler is allowed to cost. `loop` keeps one
+	# interpreter alive and ticks from inside it; measured on target at about
+	# 8 ms per tick, 0.5% of one core.
 	#
-	# The loop serialises itself: the sleep starts after the pass, so a box
-	# with a large conntrack table degrades into a slower cadence rather than
-	# into two overlapping passes. Nothing reads the result until the page
-	# does, so a long pass costs nothing but its own CPU.
+	# It reads three files per pass - the two ring counters of every port and
+	# the uplink - and walks nothing else. Per-client attribution, ARP, iw and
+	# the lease file stay on the collect clock above; that pass is 0.47 s and
+	# belongs to nobody's second.
 	if [ "$tick_interval" -gt 0 ] 2>/dev/null; then
 		procd_open_instance "$NAME-tick"
-		procd_set_param command /bin/sh -c \
-			"while true; do $PROBE tick '$samples' $max_bytes >/dev/null 2>&1; sleep $tick_interval; done"
+		procd_set_param command "$PROBE" loop "$samples" "$max_bytes" "$((tick_interval * 1000))"
 		procd_set_param respawn 3600 5 5
 		procd_set_param stdout 1
 		procd_set_param stderr 1
