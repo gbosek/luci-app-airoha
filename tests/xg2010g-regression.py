@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise actual merged WAN, history and cache code without device writes."""
 from pathlib import Path
-import json, os, re, subprocess, tempfile
+import json, os, re, subprocess, tempfile, shutil
 R=Path(__file__).resolve().parents[1]
 app=R/'luci-app-clients'
 probe=(app/'root/usr/libexec/clients-probe').read_text()
@@ -107,4 +107,29 @@ _cpu_hist_sample 1000000 110
  subprocess.run(['sh','-c',code],capture_output=True,text=True,check=True)
  assert len(freq.read_text().splitlines())==2
  fields=load.read_text().split();assert fields==['110','200'],fields
-print('PASS: real ucode dual-WAN/IPv6 alias/down/reset/AP cases; browser agreement; cache hit/failure/expiry/clock rollback; actual CPU history sampling')
+# Sampling is not publication. Execute the JSON publisher and the exact
+# _cpu_hist wrapper used by get_status, so an awk parse failure cannot be
+# hidden behind get_status's empty-history fallback again.
+busybox=os.environ.get('BUSYBOX_BIN') or shutil.which('busybox')
+engines=([busybox] if busybox else [])+[None]
+for engine in engines:
+ with tempfile.TemporaryDirectory(prefix='airoha-publish-') as d:
+  d=Path(d);freq=d/'freq';load=d/'load'
+  freq.write_text('100 500000\n110 1000000\ninvalid row\n')
+  load.write_text('100 43 - 1000\n110 200 invalid 0\ninvalid row\n')
+  prefix=f'HIST_FREQ="{freq}"; HIST_LOAD="{load}"; HIST_LOCK="{d}/lock"; HIST_TTL=1800\n'
+  if engine:prefix+='awk() { "'+engine+'" awk "$@"; }\n'
+  body=prefix+fn(rpc,'_cpu_hist_json')+'\n'
+  result=subprocess.run(['sh','-c',body+'_cpu_hist_json 110\n'],capture_output=True,text=True)
+  assert result.returncode==0 and result.stdout,(engine,'history JSON publication failed',result.stderr)
+  expected={'freq':[[100,500000],[110,1000000]],'load':[[100,[43,None,1000]],[110,[200,None,0]]]}
+  assert json.loads(result.stdout)==expected,(engine,result.stdout)
+  # Same wrapper as the getStatus path, with sampling neutralised so this
+  # specifically checks publication/locking rather than inventing /proc data.
+  code=body+'date() { echo 110; }\n_cpu_hist_sample() { :; }\n'+fn(rpc,'_cpu_hist')+'\n_cpu_hist 500000\n'
+  result=subprocess.run(['sh','-c',code],capture_output=True,text=True,check=True)
+  assert json.loads(result.stdout)==expected,(engine,'getStatus history wrapper')
+  freq.write_text('');load.write_text('')
+  result=subprocess.run(['sh','-c',body+'_cpu_hist_json 110\n'],capture_output=True,text=True,check=True)
+  assert json.loads(result.stdout)=={'freq':[],'load':[]}
+print('PASS: real ucode dual-WAN/IPv6 alias/down/reset/AP; browser/history scaling; cache lifecycle; actual history sampling AND JSON publication/getStatus wrapper; awk engines='+str(len(engines)))
