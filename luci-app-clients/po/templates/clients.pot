@@ -327,3 +327,15 @@ msgstr ""
 
 msgid "This device bridges, so the figures come from the hardware port counters: WAN is the traffic through the uplink port, LAN is what the remaining ports carried. The bracketed figures are counted by the background collector since it started."
 msgstr ""
+
+msgid "Inner-LAN traffic"
+msgstr ""
+
+msgid "This device cannot count client-to-client traffic: it needs a bridge and nftables."
+msgstr ""
+
+msgid "Client-to-client traffic over the selected window."
+msgstr ""
+
+msgid "Frames the clients on this LAN exchanged with each other, counted by an nftables rule on the bridge. Same-subnet traffic is switched, never routed, so it is missing from the two rates above, from Total, and from conntrack."
+msgstr ""

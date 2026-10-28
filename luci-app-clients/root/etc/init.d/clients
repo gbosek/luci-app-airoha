@@ -58,6 +58,13 @@ start_service() {
 	# seconds have passed since the last one. Cheap enough to leave running
 	# with nobody watching, which is the point - the page must not be the
 	# thing that starts the measurement.
+	#
+	# The bridge counter for inner-LAN traffic is installed here, once, because
+	# the sampler must only ever read it: a rule that a per-pass failure could
+	# recreate is a rule that could thrash the counter and its baseline. A
+	# reboot wipes it, and so does any bridge change - both land here.
+	$PROBE intra-setup >/dev/null 2>&1
+
 	procd_open_instance "$NAME"
 	procd_set_param command /bin/sh -c \
 		"while true; do $PROBE collect '$path' $retention $interval '$snapshot' $max_bytes >/dev/null 2>&1; sleep $live_interval; done"
@@ -103,6 +110,16 @@ service_triggers() {
 	# interval.
 	procd_add_reload_trigger "clients"
 	procd_add_reload_trigger "wireless"
+	# The inner-LAN counter lives in the bridge family, which our own reload
+	# path rebuilds. A firewall change is the moment someone may also have
+	# flushed tables by hand, so replay the rule then too.
+	procd_add_reload_trigger "firewall"
+}
+
+stop_service() {
+	# Leave nothing behind in the firewall: the counter is ours, and a stopped
+	# service that still costs a rule evaluation per bridged frame is a bug.
+	nft delete table bridge clients_intra 2>/dev/null
 }
 
 reload_service() {

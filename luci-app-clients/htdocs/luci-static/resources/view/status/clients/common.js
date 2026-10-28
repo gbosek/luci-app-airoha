@@ -945,6 +945,10 @@ function decodeTrendPoint(point) {
 		lanDown: point.lanDown || 0,
 		wanUp: point.wanUp || 0,
 		wanDown: point.wanDown || 0,
+		/* Absent rather than zero when the collector could not measure it: a
+		 * device without a bridge or without nft has no such series, and the
+		 * chart must not draw a floor line for a figure nobody measured. */
+		intra: (point.intra != null) ? (Number(point.intra) || 0) : null,
 		byMac: Object.create(null)
 	};
 
@@ -1027,6 +1031,7 @@ function createStore() {
 			traffic: {},
 			stats: null,
 			bridge: null,
+			intra: null,
 			snoop4: [],
 			snoop6: [],
 			names: {},
@@ -1109,6 +1114,10 @@ function createStore() {
 			 * (first pass after the collector started) falls back to building
 			 * points here, so the chart is never blank while data exists. */
 			self.trendFromFile = Array.isArray(data.trend) && data.trend.length > 0;
+
+			/* Client-to-client traffic: one rate, no direction, and absent
+			 * from devices where the collector cannot count it. */
+			self.state.intra = (data.intra && data.intra.ok === true) ? data.intra : null;
 
 			if (self.trendFromFile)
 				self.trend = data.trend.map(decodeTrendPoint);

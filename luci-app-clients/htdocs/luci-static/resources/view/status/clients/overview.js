@@ -39,7 +39,9 @@ var WINDOWS = [
 
 var TYPES = [
 	{ value: 'total', label: _('Total') },
-	{ value: 'wan', label: _('WAN') }
+	{ value: 'wan', label: _('WAN') },
+	{ value: 'lan', label: _('LAN traffic') },
+	{ value: 'intra', label: _('Inner-LAN traffic') }
 ];
 
 /* Unique id counter for the chart's <linearGradient> defs: ids live in the
@@ -187,7 +189,7 @@ return L.Class.extend({
 		/* `idle` renders the tile as "not applicable" rather than "zero": on a
 		 * routed box with one LAN subnet the counter can never move, and a hard
 		 * 0 B/s there reads as a broken figure instead of an empty scope. */
-		function block(label, up, down, totalUp, totalDown, title, idle) {
+		function block(label, up, down, totalUp, totalDown, title, idle, extra) {
 			var attrs = { 'class': 'clients-block' };
 
 			if (title)
@@ -201,8 +203,7 @@ return L.Class.extend({
 				return idle ? '' : '(' + common.formatSize(value) + ')';
 			}
 
-			return E('div', attrs, [
-				E('div', { 'class': 'clients-block__title' }, label),
+			var rows = [
 				E('div', { 'class': 'clients-block__row' }, [
 					E('span', { 'class': 'clients-block__dir clients-block__dir--up' }, '↑'),
 					E('span', { 'class': 'clients-block__rate' }, rate(up)),
@@ -213,7 +214,21 @@ return L.Class.extend({
 					E('span', { 'class': 'clients-block__rate' }, rate(down)),
 					E('span', { 'class': 'clients-block__total' }, total(totalDown))
 				])
-			]);
+			];
+
+			/* A third figure below the hairline: not a third direction, a
+			 * different measurement. Only the LAN tile has one. */
+			if (extra)
+				rows.push(E('div', {
+					'class': 'clients-block__row clients-block__row--intra',
+					'title': extra.title
+				}, [
+					E('span', { 'class': 'clients-block__dir clients-block__dir--intra' }, '⇄'),
+					E('span', { 'class': 'clients-block__rate' }, common.formatRate(extra.rate)),
+					E('span', { 'class': 'clients-block__total' }, '(' + common.formatSize(extra.total) + ')')
+				]));
+
+			return E('div', attrs, [ E('div', { 'class': 'clients-block__title' }, label) ].concat(rows));
 		}
 
 		var totalUp = summary.lanUp + summary.wanUp;
@@ -228,6 +243,20 @@ return L.Class.extend({
 		var lanIdle = !viaPorts &&
 			!(summary.lanUp || summary.lanDown || summary.lanTotalUp || summary.lanTotalDown);
 
+		/* Client-to-client traffic, measured where it can be: the bridge
+		 * counter. On an AP the LAN tile above already is that figure - the
+		 * port counters sum to it - so a second row would look like a double
+		 * count. On a routed box it is the only figure that describes what the
+		 * clients do among themselves. */
+		var intra = this.store.state.intra;
+		var intraRow = (!viaPorts && intra && intra.ok === true)
+			? {
+				rate: intra.rate || 0,
+				total: intra.total || 0,
+				title: _('Frames the clients on this LAN exchanged with each other, counted by an nftables rule on the bridge. Same-subnet traffic is switched, never routed, so it is missing from the two rates above, from Total, and from conntrack.')
+			}
+			: null;
+
 		/* The LAN figure means different things depending on the role of this
 		 * box, so it says which one it is instead of leaving the reader to
 		 * wonder why a busy LAN can read zero. */
@@ -237,7 +266,7 @@ return L.Class.extend({
 				viaPorts
 					? _('What the clients on this LAN exchanged with each other, counted by the hardware port counters.')
 					: _('Traffic this box routed between LAN subnets. Frames between two clients of the same subnet are switched, not routed, so they never reach this counter.'),
-				lanIdle),
+				lanIdle, intraRow),
 			block(_('WAN traffic'), summary.wanUp, summary.wanDown,
 				summary.wanTotalUp, summary.wanTotalDown),
 			block(_('Total'), totalUp, totalDown, totalUpBytes, totalDownBytes),
@@ -264,9 +293,32 @@ return L.Class.extend({
 	/* ---------------- chart ---------------- */
 
 	/*
-	 * Two series, one axis. `pick(point)` returns { up, down } in bytes/second
-	 * for a point, which lets the same drawing code serve the totals and a
-	 * single device without a second implementation.
+	 * The series the chart draws for the selected type: `key` picks the value
+	 * out of `seriesFor()`, and the label is what the legend and the tooltip
+	 * call it.
+	 *
+	 * Everything but inner-LAN traffic is a pair. Client-to-client frames have
+	 * no direction - both ends are clients, and the counter in the bridge
+	 * family sees each frame once - so that one is a single line, and the
+	 * drawing code iterates this list instead of assuming two.
+	 */
+	chartSeries: function() {
+		if (this.selectedType == 'intra')
+			return [ {
+				key: 'up', cls: 'intra',
+				label: _('Inner-LAN traffic'), color: 'var(--cl-intra)'
+			} ];
+
+		return [
+			{ key: 'up', cls: 'up', label: _('Upload rate'), color: 'var(--cl-up)' },
+			{ key: 'down', cls: 'down', label: _('Download rate'), color: 'var(--cl-down)' }
+		];
+	},
+
+	/*
+	 * `pick(point)` returns { up, down } in bytes/second for a point, which
+	 * lets the same drawing code serve the totals, one scope and a single
+	 * device without a second implementation.
 	 */
 	seriesFor: function() {
 		var type = this.selectedType;
@@ -275,6 +327,11 @@ return L.Class.extend({
 		return function(point) {
 			var source = point;
 
+			/* Per-device series only exist for conntrack traffic: a bridge
+			 * counter cannot say which client a frame belonged to. */
+			if (type == 'intra')
+				return { up: point.intra || 0 };
+
 			if (mac) {
 				source = point.byMac ? point.byMac[mac] : null;
 
@@ -282,10 +339,13 @@ return L.Class.extend({
 					return { up: 0, down: 0 };
 			}
 
-		if (type == 'wan')
-			return { up: source.wanUp || 0, down: source.wanDown || 0 };
+			if (type == 'wan')
+				return { up: source.wanUp || 0, down: source.wanDown || 0 };
 
-		return {
+			if (type == 'lan')
+				return { up: source.lanUp || 0, down: source.lanDown || 0 };
+
+			return {
 				up: (source.lanUp || 0) + (source.wanUp || 0),
 				down: (source.lanDown || 0) + (source.wanDown || 0)
 			};
@@ -315,6 +375,15 @@ return L.Class.extend({
 		 * breaking its line at null samples. */
 		var points = this.visiblePoints().filter(function(p) { return p.valid !== false; });
 		var pick = this.seriesFor();
+		var series = this.chartSeries();
+
+		/* The legend names whatever is drawn, so switching type has to rebuild
+		 * it: a single-series view showing two keys would promise a line that
+		 * is not there. */
+		if (this.legend)
+			dom.content(this.legend, series.map(function(one) {
+				return E('span', { 'class': 'clients-chart__key clients-chart__key--' + one.cls }, one.label);
+			}));
 
 		var width = 720, height = 220;
 		var padX = 8, padTop = 14, padBottom = 10;
@@ -329,11 +398,24 @@ return L.Class.extend({
 			return;
 		}
 
+		/* A device with no bridge, or without nft, has no inner-LAN series at
+		 * all - an empty chart says that, a flat line at zero would claim the
+		 * clients were measured as silent. */
+		if (this.selectedType == 'intra' && !points.some(function(p) { return p.intra != null; })) {
+			dom.content(this.chart, [
+				E('div', { 'class': 'clients-chart__empty' },
+					_('This device cannot count client-to-client traffic: it needs a bridge and nftables.'))
+			]);
+			return;
+		}
+
 		var values = points.map(pick);
 		var peak = 0;
 
 		values.forEach(function(v) {
-			peak = Math.max(peak, v.up, v.down);
+			series.forEach(function(one) {
+				peak = Math.max(peak, v[one.key] || 0);
+			});
 		});
 
 		var ceiling = niceCeiling(peak);
@@ -393,8 +475,7 @@ return L.Class.extend({
 				+ common.formatRate(ceiling * step / 4) + '</text>';
 		});
 
-		var lastUp = values[values.length - 1].up;
-		var lastDown = values[values.length - 1].down;
+		var last = values[values.length - 1];
 
 		function esc(text) {
 			return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -410,30 +491,34 @@ return L.Class.extend({
 		var host = E('div');
 		var gid = 'clim' + (++chartSeq);
 
+		/* Built from the series list rather than written out twice: the shape
+		 * of the drawing is the same for one series and for two, and the
+		 * inner-LAN type proves it. */
+		var defs = '', marks = '';
+
+		series.forEach(function(one) {
+			defs += '<linearGradient id="' + gid + '-' + one.key + '" x1="0" y1="0" x2="0" y2="1">'
+				+ '<stop offset="0" style="stop-color:' + one.color + ';stop-opacity:.40"/>'
+				+ '<stop offset="1" style="stop-color:' + one.color + ';stop-opacity:0"/>'
+				+ '</linearGradient>';
+
+			marks += '<path d="' + area(one.key) + '" fill="url(#' + gid + '-' + one.key + ')" stroke="none"/>'
+				+ '<path d="' + line(one.key) + '" fill="none" stroke="' + one.color + '" stroke-width="2"'
+				+ ' stroke-linejoin="round" stroke-linecap="round"/>'
+				+ '<circle cx="' + x(t1).toFixed(1) + '" cy="' + y(last[one.key] || 0).toFixed(1)
+				+ '" r="3" fill="' + one.color + '"/>';
+		});
+
 		host.innerHTML =
 			'<svg viewBox="0 0 ' + width + ' ' + height + '" width="100%" class="clients-chart__svg"'
 			+ ' style="display:block;cursor:crosshair" role="img">'
 			+ '<title>' + esc(_('Traffic trend')) + '</title>'
-			+ '<desc>' + esc(_('Upload and download rates over the selected window.')) + '</desc>'
-			+ '<defs>'
-			+ '<linearGradient id="' + gid + '-up" x1="0" y1="0" x2="0" y2="1">'
-			+ '<stop offset="0" style="stop-color:var(--cl-up);stop-opacity:.40"/>'
-			+ '<stop offset="1" style="stop-color:var(--cl-up);stop-opacity:0"/>'
-			+ '</linearGradient>'
-			+ '<linearGradient id="' + gid + '-down" x1="0" y1="0" x2="0" y2="1">'
-			+ '<stop offset="0" style="stop-color:var(--cl-down);stop-opacity:.40"/>'
-			+ '<stop offset="1" style="stop-color:var(--cl-down);stop-opacity:0"/>'
-			+ '</linearGradient>'
-			+ '</defs>'
+			+ '<desc>' + esc(this.selectedType == 'intra'
+				? _('Client-to-client traffic over the selected window.')
+				: _('Upload and download rates over the selected window.')) + '</desc>'
+			+ '<defs>' + defs + '</defs>'
 			+ '<g>' + grid + '</g>'
-			+ '<path d="' + area('up') + '" fill="url(#' + gid + '-up)" stroke="none"/>'
-			+ '<path d="' + area('down') + '" fill="url(#' + gid + '-down)" stroke="none"/>'
-			+ '<path d="' + line('up') + '" fill="none" stroke="var(--cl-up)" stroke-width="2"'
-			+ ' stroke-linejoin="round" stroke-linecap="round"/>'
-			+ '<path d="' + line('down') + '" fill="none" stroke="var(--cl-down)" stroke-width="2"'
-			+ ' stroke-linejoin="round" stroke-linecap="round"/>'
-			+ '<circle cx="' + x(t1).toFixed(1) + '" cy="' + y(lastUp).toFixed(1) + '" r="3" fill="var(--cl-up)"/>'
-			+ '<circle cx="' + x(t1).toFixed(1) + '" cy="' + y(lastDown).toFixed(1) + '" r="3" fill="var(--cl-down)"/>'
+			+ marks
 			+ '</svg>';
 
 		var svg = host.firstChild;
@@ -470,11 +555,10 @@ return L.Class.extend({
 		});
 		svg.appendChild(guide);
 
-		var dotColors = [ 'var(--cl-up)', 'var(--cl-down)' ];
-		var dots = dotColors.map(function(color) {
+		var dots = series.map(function(one) {
 			var dot = svgChild('circle', {
 				'cx': 0, 'cy': 0, 'r': '3.5',
-				'fill': color, 'stroke': 'var(--cl-surface)', 'stroke-width': '1.5',
+				'fill': one.color, 'stroke': 'var(--cl-surface)', 'stroke-width': '1.5',
 				'visibility': 'hidden'
 			});
 			svg.appendChild(dot);
@@ -502,9 +586,11 @@ return L.Class.extend({
 			guide.setAttribute('x2', xs[i].toFixed(1));
 			guide.setAttribute('visibility', 'visible');
 
-			[ [ v.up, y(v.up) ], [ v.down, y(v.down) ] ].forEach(function(c, d) {
+			series.forEach(function(one, d) {
+				var value = v[one.key] || 0;
+
 				dots[d].setAttribute('cx', xs[i].toFixed(1));
-				dots[d].setAttribute('cy', c[1].toFixed(1));
+				dots[d].setAttribute('cy', y(value).toFixed(1));
 				dots[d].setAttribute('visibility', 'visible');
 			});
 
@@ -513,8 +599,13 @@ return L.Class.extend({
 				'style': 'color:var(--cl-muted);font-weight:650;margin-bottom:2px'
 			}, fmtSampleClock(points[i].t)));
 
-			[ { label: _('Upload rate'), value: common.formatRate(v.up), color: dotColors[0] },
-			  { label: _('Download rate'), value: common.formatRate(v.down), color: dotColors[1] } ]
+			series.map(function(one) {
+				return {
+					label: one.label,
+					value: common.formatRate(v[one.key] || 0),
+					color: one.color
+				};
+			})
 			.forEach(function(row) {
 				tip.appendChild(E('div', {
 					'style': 'display:flex;align-items:center;gap:.4em;white-space:nowrap'
@@ -598,6 +689,10 @@ return L.Class.extend({
 
 		this.summary = E('div', { 'class': 'clients-blocks' });
 		this.chart = E('div', { 'class': 'clients-chart' });
+		/* Created here, not inline in the tree below: update() renders the
+		 * chart before the tree exists, and the first paint must already name
+		 * the series it drew. */
+		this.legend = E('div', { 'class': 'clients-chart__legend' });
 		this.deviceSelect = E('select', { 'id': 'clients-ov-device', 'name': 'clients-ov-device', 'class': 'cbi-input-select' }, this.deviceOptions());
 
 		this.deviceSelect.addEventListener('change', function() {
@@ -611,6 +706,9 @@ return L.Class.extend({
 
 		typeSelect.addEventListener('change', function() {
 			self.selectedType = typeSelect.value;
+			/* The device picker filters the per-device conntrack series, and a
+			 * bridge counter cannot say which client a frame belonged to. */
+			self.deviceSelect.disabled = (self.selectedType == 'intra');
 			self.renderChart();
 		});
 
@@ -670,10 +768,7 @@ return L.Class.extend({
 					E('span', {}, _('Window')),
 					windowSelect
 				]),
-				E('div', { 'class': 'clients-chart__legend' }, [
-					E('span', { 'class': 'clients-chart__key clients-chart__key--up' }, _('Upload rate')),
-					E('span', { 'class': 'clients-chart__key clients-chart__key--down' }, _('Download rate'))
-				])
+				this.legend
 			]),
 			this.chart,
 			E('p', { 'class': 'clients-note' },

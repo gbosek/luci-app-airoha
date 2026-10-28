@@ -43,11 +43,15 @@ nothing here starts a measurement, and nothing polls a daemon over a socket.
 | live snapshot | everything above, with the counters already turned into rates and running totals | `clients-probe collect`, every 10 s |
 | archive | first / last seen, last known association and name | `clients-probe collect`, every 30 s |
 | dnsmasq query log | DNS records with response time and result | `clients-dns collect`, every 10 s |
+| nftables bridge counter | traffic between two clients of the same subnet, which nothing else sees | `clients-probe intra-setup`, once at service start |
 
 The sampling clock belongs to the collector, not to the browser: every pass
 walks conntrack once and writes `/tmp/clients-snapshot.json`, with `rates`,
 `totals` and the `rate_window` they were divided by, plus one `trend` point
-(the summed LAN/WAN rates and, on a routed box, the busiest eight devices). The
+(the summed LAN/WAN rates, the inner-LAN figure, and on a routed box the busiest
+eight devices). The chart's *Type* selector picks one of four: total, WAN, LAN
+(the routed scope above) and inner-LAN traffic, the last drawn as a single line
+because it has no direction. The
 series holds 180 points - 30 minutes at the default cadence, enough for the
 widest window the page offers - so the chart is already drawn from history when
 the page opens instead of filling in from the moment someone looks. Opening the
@@ -64,18 +68,59 @@ sum of the other two. Both halves come from conntrack accounting, split by the
 far-end address of each flow: an address inside a LAN subnet is LAN, anything
 else is WAN.
 
-Two clients on the **same** subnet never appear in that LAN figure. Their frames
-are forwarded by the bridge at layer 2, so no conntrack entry is ever created and
-no counter the kernel exposes for this purpose moves. On a routed box with a
-single LAN subnet the LAN tile therefore has nothing to report, and it shows an
-em dash instead of `0 B/s` - a zero would suggest the figure is measured and
-happens to be idle. It turns into real numbers as soon as traffic crosses between
-LAN subnets, which is the only LAN traffic conntrack can see.
+Two clients on the **same** subnet never appear in that figure. Their frames are
+forwarded by the bridge at layer 2, so no conntrack entry is ever created and no
+counter conntrack exposes moves. On a routed box with a single LAN subnet the
+LAN tile therefore has nothing to report, and it shows an em dash instead of
+`0 B/s` - a zero would suggest the figure is measured and happens to be idle. It
+turns into real numbers as soon as traffic crosses between LAN subnets, which is
+the only LAN traffic conntrack can see.
 
 On a bridge (an AP), where the box switches rather than routes, the figures come
 from the hardware port counters instead: WAN is the uplink port, LAN is the sum
 of the remaining member ports. Those counters do see client-to-client traffic,
 so the LAN tile is meaningful there.
+
+### Counting the traffic conntrack cannot see
+
+Switched frames are invisible to layer 3, so the page measures them where the
+kernel does expose them: a counter rule in the `bridge` family, installed once
+when the service starts.
+
+```
+table bridge clients_intra {
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		meta ibrname "br-lan" meta obrname "br-lan" counter comment "intra-lan"
+	}
+}
+```
+
+A frame is counted when it entered **and** left through the LAN bridge, which is
+exactly "switched between two of its ports". What that leaves out is what should
+be left out:
+
+- frames the router itself sends or receives - they go through the input and
+  output hooks, never forward, so client-to-router traffic is not in the figure;
+- on an AP, anything that crossed the uplink. There `wan` is a member of the LAN
+  bridge, so a bridged WAN frame also enters and leaves through it; the rule
+  gains `iifname != "wan" oifname != "wan"` in that case and only client-to-client
+  frames remain.
+
+The counter has **no direction**: both ends of the exchange are clients, so
+upload and download have no meaning. The overview shows it on its own line under
+the LAN rates (marked `⇄`), and the chart offers it as its own type, drawn as a
+single line.
+
+It is not part of Total: on an AP the port counters behind the LAN tile already
+include it, and adding it again would count those frames twice.
+
+Installed by `clients-probe intra-setup` at start-up, rebuilt on every service
+reload and on a firewall reload, and removed by `stop`. A manual `nft flush
+ruleset` therefore takes the figure away until the next `service clients
+restart`; until then the page leaves the row and the chart type out rather than
+showing a flat zero. `clients-probe status` prints the last figure the collector
+saw, and `clients-probe intra` reads the counter directly.
 
 The archive merge rides on the same pass but on a slower clock
 (`clients.global.interval`), and the stamp that decides it lives in the live
@@ -176,9 +221,11 @@ reboot - and update `acl.d/luci-app-clients.json` to match the new paths.
 `max_bytes` gives up rows before it is written - rates first, then the snooped
 hints, then whole client rows, the archive's oldest entries, and the DNS
 archive's oldest records - so the worst case is `max_bytes` per file instead of
-a function of how many addresses the network handed out. The default of 256 KiB
-is several times what a /24 of real clients needs; a `/24` under normal use
-costs about 210 KiB in total.
+a function of how many addresses the network handed out. The ceiling is **per
+file**, so the hard worst case is five times `max_bytes` (1.25 MiB at the
+default) even though a real network never gets close: measured on a `/24` under
+normal use the five files total 270-290 KiB, most of it the DNS archive sitting
+just under its own 256 KiB.
 
 The trend series is the largest single item in the snapshot - about 75 KiB with
 eight devices and a full 180 points on a routed box, and about 14 KiB on a

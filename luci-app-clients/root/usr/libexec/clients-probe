@@ -55,7 +55,15 @@
  *                          sample, refresh the live cache, merge into history
  *   clients-probe read     print the history file
  *   clients-probe clear    empty the history file
- *   clients-probe status   file sizes and history summary
+ *   clients-probe status   file sizes, history summary, last inner-LAN figure
+ *   clients-probe intra-setup  (re)create the bridge counter for inner-LAN traffic
+ *   clients-probe intra    print that counter as it stands
+ *
+ * `intra` in the snapshot is the traffic between two clients of the same
+ * subnet, which only a counter in the kernel's bridge family can see: the
+ * frames are switched, never routed, so conntrack never learns about them.
+ * It is one figure without a direction, and unavailable (`ok: false`) on a
+ * device without a bridge or without nft.
  *
  * The history is what makes the page more than a live view: first and last seen
  * survive a station going away, and the wireless association (SSID, band,
@@ -1010,6 +1018,7 @@ function port_counters() {
 	)), '\n');
 	let ports = {};
 	let members = [];
+	let bridges = {};
 	let uplink = null;
 
 	for (let line in lines) {
@@ -1018,6 +1027,7 @@ function port_counters() {
 		if (length(parts) != 2)
 			continue;
 
+		let bridge = parts[0];
 		let member = parts[1];
 
 		if (ports[member] != null)
@@ -1032,6 +1042,11 @@ function port_counters() {
 		ports[member] = { rx: rx, tx: tx };
 		push(members, member);
 
+		if (bridges[bridge] == null)
+			bridges[bridge] = [];
+
+		push(bridges[bridge], member);
+
 		if (member == 'wan')
 			uplink = member;
 	}
@@ -1040,7 +1055,8 @@ function port_counters() {
 		mode: uplink != null,
 		uplink: uplink,
 		members: members,
-		ports: ports
+		ports: ports,
+		bridges: bridges
 	};
 }
 
@@ -1906,6 +1922,205 @@ function bridge_derive(data, prev) {
 	data.bridge.totals = totals;
 }
 
+/* ---------------- inner-LAN traffic (nft bridge counter) ---------------- */
+
+/*
+ * Two clients on the same subnet are forwarded by the bridge at layer 2: no
+ * conntrack entry is ever created, so every counter this file reads elsewhere
+ * stays at zero for that traffic. The bridge family is the one place the kernel
+ * exposes it, and a counter rule there sees exactly the frames that were
+ * switched between two ports of the LAN bridge.
+ *
+ * What the rule deliberately does NOT count:
+ *
+ *   - frames the router itself sends or receives - they enter the input or
+ *     output hook, never forward;
+ *   - on an AP, anything that crossed the uplink port. There "wan" is a member
+ *     of the LAN bridge, so a bridged WAN frame also enters and leaves through
+ *     it; excluding that port by name is what leaves only client-to-client.
+ *
+ * The counter has no direction: both ends of the exchange are clients, so
+ * "up" and "down" have no meaning here and the page shows one figure.
+ *
+ * The table is created once by `intra-setup`, which the service runs when it
+ * starts, so the sampling loop below only ever reads it. Verified on target
+ * (nft 1.1.7): the br-iptv table's `meta ibrname` matcher works the same way
+ * and the exclusive counter moved only for frames that stayed inside the
+ * bridge.
+ */
+const INTRA_TABLE = 'clients_intra';
+const INTRA_COMMENT = 'intra-lan';
+
+/*
+ * Which bridge carries the clients, and which of its members is the uplink.
+ * `br-lan` is the name OpenWrt gives it; anything else is a guess, and the
+ * counter is not worth guessing wrong about too hard - if there is no bridge
+ * the feature reports itself unavailable and the page leaves the row out.
+ */
+function lan_bridge() {
+	let pc = port_counters();
+	let chosen = null;
+
+	if (pc.bridges['br-lan'] != null) {
+		chosen = 'br-lan';
+	}
+	else {
+		let best = -1;
+
+		for (let name, members in pc.bridges) {
+			if (length(members) > best) {
+				best = length(members);
+				chosen = name;
+			}
+		}
+	}
+
+	if (chosen == null)
+		return { bridge: null, uplink: null };
+
+	let uplink = null;
+
+	for (let member in pc.bridges[chosen])
+		if (member == 'wan')
+			uplink = 'wan';
+
+	return { bridge: chosen, uplink: uplink };
+}
+
+/* Reads the rule's own counters back out of nft's JSON, including the bridge
+ * name it was built for, so the sampler never has to rediscover either. */
+function intra_read() {
+	let raw = trim(run('nft -j list table bridge ' + INTRA_TABLE + ' 2>/dev/null'));
+
+	if (length(raw) == 0)
+		return { ok: false };
+
+	let doc = null;
+
+	try {
+		doc = json(raw);
+	}
+	catch (e) {
+		return { ok: false };
+	}
+
+	if (type(doc?.nftables) != 'array')
+		return { ok: false };
+
+	for (let item in doc.nftables) {
+		let rule = item?.rule;
+
+		if (rule?.comment != INTRA_COMMENT)
+			continue;
+
+		let counter = null;
+		let bridge = null;
+
+		for (let expr in (rule.expr ?? [])) {
+			if (expr?.counter != null)
+				counter = expr.counter;
+
+			if (expr?.match?.left?.meta?.key == 'ibrname')
+				bridge = expr.match.right;
+		}
+
+		if (counter == null)
+			return { ok: false };
+
+		return {
+			ok: true,
+			bridge: bridge,
+			packets: int(counter.packets) ?? 0,
+			bytes: int(counter.bytes) ?? 0
+		};
+	}
+
+	return { ok: false };
+}
+
+/*
+ * (Re)builds the counter for the current topology. Rebuilding rather than
+ * patching keeps this idempotent: the table is dropped and recreated with the
+ * bridge and uplink of this boot, and a reset counter simply reads as "no
+ * delta yet" on the next pass.
+ */
+function intra_setup() {
+	let info = lan_bridge();
+
+	if (info.bridge == null)
+		return { ok: false, reason: 'no bridge' };
+
+	let guard = '';
+
+	if (info.uplink != null)
+		guard = 'iifname != "' + info.uplink + '" oifname != "' + info.uplink + '" ';
+
+	let cmd = 'nft delete table bridge ' + INTRA_TABLE + ' 2>/dev/null; '
+		+ 'nft add table bridge ' + INTRA_TABLE + ' && '
+		+ 'nft add chain bridge ' + INTRA_TABLE + ' forward "{ type filter hook forward priority filter; policy accept; }" && '
+		+ 'nft add rule bridge ' + INTRA_TABLE + ' forward meta ibrname "' + info.bridge
+		+ '" meta obrname "' + info.bridge + '" ' + guard
+		+ 'counter comment "' + INTRA_COMMENT + '"';
+
+	run(cmd);
+
+	let now = intra_read();
+
+	if (!now.ok)
+		return { ok: false, reason: 'rule not loaded', bridge: info.bridge };
+
+	now.bridge = info.bridge;
+	now.uplink = info.uplink;
+	now.counted = true;
+
+	return now;
+}
+
+function intra_derive(data, prev) {
+	let now = intra_read();
+
+	if (!now.ok) {
+		data.intra = { ok: false };
+		return;
+	}
+
+	let dt = data.ts - (int(prev?.ts) ?? 0);
+	let fresh = (dt > 0 && dt <= RATE_MAX_GAP);
+	let before = (prev?.intra?.ok == true) ? int(prev.intra.bytes) : null;
+	let total = (prev?.intra?.ok == true) ? (int(prev.intra.total) ?? 0) : 0;
+
+	/* A rebuilt rule starts again from zero, so a counter that went backwards
+	 * is a reset, not negative traffic: keep the running total, drop the rate
+	 * for this pass. */
+	if (before != null && now.bytes >= before) {
+		let delta = now.bytes - before;
+
+		total += delta;
+
+		data.intra = {
+			ok: true,
+			bridge: now.bridge,
+			packets: now.packets,
+			bytes: now.bytes,
+			rate: fresh ? int(delta / dt) : 0,
+			total: total,
+			window: fresh ? dt : 0
+		};
+
+		return;
+	}
+
+	data.intra = {
+		ok: true,
+		bridge: now.bridge,
+		packets: now.packets,
+		bytes: now.bytes,
+		rate: 0,
+		total: total,
+		window: 0
+	};
+}
+
 /*
  * The per-device series, busiest first and as flat arrays: the MAC would
  * otherwise be repeated for every one of the 180 points it appears in, and
@@ -1947,6 +2162,11 @@ function trend_macs(per_mac) {
 function trend_append(data, prev, ipMac) {
 	let trend = (type(prev?.trend) == 'array') ? prev.trend : [];
 	let point = { t: data.ts, valid: ((data.rate_window ?? 0) > 0) };
+
+	/* One number, no direction: the counter in the bridge family sees a frame
+	 * once, and both of its ends are clients. */
+	if (data.intra?.ok == true)
+		point.intra = data.intra.rate ?? 0;
 
 	if (data.bridge?.mode) {
 		let uplink = data.bridge.uplink;
@@ -2474,6 +2694,7 @@ if (length(ARGV)) {
 		 * somebody is looking. */
 		traffic_derive(snap, prev);
 		bridge_derive(snap, prev);
+		intra_derive(snap, prev);
 		trend_append(snap, prev, ip_mac_map(snap.arp, { snoop4: snap.snoop4, snoop6: snap.snoop6 }));
 
 		/* The archive is merged on its own, slower clock and rides on the
@@ -2525,9 +2746,19 @@ if (length(ARGV)) {
 
 		result = history_status(path);
 		result.cache = file_report([ path, cache, SNOOP_FILE, PTR_CACHE, DNS_FILE ], max_bytes);
+
+		/* Reported from the snapshot instead of asking nft again: the figure
+		 * the page shows is the one in that file, and status is meant to be a
+		 * cheap read of what the collector has already done. */
+		let cached = cache_load(cache);
+		result.intra = cached?.intra ?? { ok: false };
 	}
+	else if (cmd == 'intra-setup')
+		result = intra_setup();
+	else if (cmd == 'intra')
+		result = intra_read();
 	else
-		result = { ok: false, error: 'usage: clients-probe [collect|read|clear|status|nlbw] [path|period] [retention_days] [every] [snapshot] [max_bytes]' };
+		result = { ok: false, error: 'usage: clients-probe [collect|read|clear|status|nlbw|intra|intra-setup] [path|period] [retention_days] [every] [snapshot] [max_bytes]' };
 
 	print(sprintf('%J\n', result));
 	exit((result.ok == false) ? 1 : 0);
