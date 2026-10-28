@@ -679,6 +679,7 @@ _airoha_topology_cache_valid() {
 # Include split GDM/NBQ children as separate netdevs, never shared MIB samples.
 # Only structure is cached; all link/MIB values and the whole PON block are read
 # live so registration and traffic changes remain visible between polls.
+# The finished JSON is cached by the wrapper below, which is what callers use.
 _airoha_port_topology_json_live() {
 	local cache="/tmp/airoha-topology.struct"
 	local model="" compatible="" wan_netdev="" lan_count=0 wan_count=0 has_pon=0
@@ -785,9 +786,9 @@ airoha_port_topology_json() {
 
 	json=$(_airoha_port_topology_json_live)
 
-	# Only cache a well-formed answer that actually describes ports: an empty
-	# answer (the builder's own cache could not be built) and the degraded
-	# object with an empty port list both mean "try again next round".
+	# Only cache a well-formed answer that actually describes ports. "" (the
+	# builder prints nothing when its own cache cannot be built) and the
+	# degraded object with an empty port list both mean "try again next round".
 	case "$json" in
 		'{'*'}') ;;
 		*) printf '%s' "$json"; return ;;

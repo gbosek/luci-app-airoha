@@ -1311,7 +1311,7 @@ function renderCdmCard(c, split) {
 		// system-wide offload ratio and not the PPE binding rate.
 		// Registers are since-boot accumulators: the cumulative ratio is
 		// dominated by everything that happened since power-on and barely moves
-		// between two 5 s polls, so the bar uses the interval and the
+		// between two polls, so the bar uses the interval and the
 		// "Since boot" line keeps the cumulative value visible.
 		aui.bar({
 			pct: pct,
@@ -1368,7 +1368,7 @@ function renderPseBufferCard(pse) {
 	var pct = total > 0 ? used / total * 100 : 0;
 	/* FE+0x100 carries the hardware's own high-water mark of this pool
 	 * (SHARE_USED_CNT_MAX). A burst is emptied again within milliseconds, so the
-	 * instantaneous word a 5 s poll reads is back to zero by the time the card
+	 * instantaneous word a poll reads is back to zero by the time the card
 	 * renders; the peak is the only honest answer to "how close has this pool
 	 * come to running out". Undefined on a backend that predates the field. */
 	var peak = (pse.peak === undefined || pse.peak === null) ? null : (Number(pse.peak) || 0);
@@ -1842,7 +1842,7 @@ return view.extend({
 			// deferred:true means "this round did not ask for PPE" (the flow
 			// table is fetched on a slower cadence - see fetchDashboardData).
 			// Leave both the table and latestPpeEntries alone: overwriting them
-			// would flash an empty flow table every 5 s and defeat the point of
+			// would flash an empty flow table on every round and defeat the point of
 			// keeping the last real snapshot.
 			if (deferPpe !== true && requestSequence > latestPpeRequest) {
 				latestPpeRequest = requestSequence;

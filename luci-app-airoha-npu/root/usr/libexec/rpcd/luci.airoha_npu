@@ -155,16 +155,11 @@ _cpu_ticks_json() {
 # Nothing here reads a file it did not just write, and every parse tolerates a
 # torn or hand-edited line instead of failing the whole reply.
 #
-# Sampling is gated to one point per HIST_GATE seconds, which with the page's
-# 5 s poll means one point every second round (10 s). The gate has to sit
-# strictly between one and two poll intervals, with room for jitter:
-#   * above 5 s, so the first paint's two back-to-back dashboards (0.05-2 s
-#     apart) and a single poll round cannot both write a sample;
-#   * at or below 10 s, so two consecutive polls always pass. A gate of 10 s
-#     would sit exactly on that boundary and any jitter would stretch the
-#     cadence to 15 s, hence 8 s (that is also why the gate must never exceed
-#     twice the poll interval: two tabs two seconds apart would then block each
-#     other at every round, forever).
+# Sampling is gated to one point per HIST_GATE seconds. The page polls every
+# 10 s, so every round passes and the curves get one point per poll; what the
+# gate still removes is the pair of dashboards a page load fires back to back
+# (0.05-2 s apart), and a second tab happening to poll in the same instant.
+# 8 s keeps both margins: below the 10 s poll, above the first-paint gap.
 # Because the newest timestamp is shared, a tab that always polls a little
 # behind another reads the curve instead of doubling its rate.
 HIST_MAX=120            # samples kept: 120 x 10 s = 20 minutes
@@ -339,10 +334,10 @@ _cpu_hist_json() {
 				if (a[1] !~ /^[0-9]+$/ || length(a) < 2) continue
 				t = a[1] + 0
 				if (now > 0 && (t < now - ttl || t > now + 60)) continue
-				# Tenths of a percent, always an integer - see the format note
-				# on _cpu_hist_sample. Anything else is a torn line.
 				s = ""
 				for (i = 2; i <= length(a); i++) {
+					/* Tenths of a percent, always an integer - see the format
+					 * note on _cpu_hist_sample. Anything else is a torn line. */
 					if (a[i] ~ /^[0-9]+$/)
 						s = s (i > 2 ? "," : "") (a[i] + 0)
 					else
